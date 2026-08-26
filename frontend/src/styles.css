@@ -634,6 +634,28 @@ h1 {
   line-height: 1.5;
 }
 
+.review-job-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin: 0.65rem 0;
+  color: #37685a;
+  font-size: 0.84rem;
+}
+
+.review-job-status-dot {
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 999px;
+  background: currentColor;
+  animation: review-job-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes review-job-pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+
 .error-message {
   border: 1px solid rgb(180 35 24 / 18%);
   background: var(--danger-soft);

@@ -45,12 +45,13 @@ export function shouldPollReviewJob(status: ReviewJobStatus): boolean {
 
 export async function waitForReviewJob(
   jobId: string,
-  options: { intervalMs?: number; signal?: AbortSignal } = {},
+  options: { intervalMs?: number; signal?: AbortSignal; onUpdate?: (job: ReviewJob) => void } = {},
 ): Promise<ReviewJob> {
   const intervalMs = Math.max(250, options.intervalMs ?? 2000);
   while (true) {
     if (options.signal?.aborted) throw new DOMException("Review job polling was cancelled.", "AbortError");
     const job = await getReviewJob(jobId);
+    options.onUpdate?.(job);
     if (!shouldPollReviewJob(job.status)) return job;
     await new Promise<void>((resolve, reject) => {
       const timer = window.setTimeout(resolve, intervalMs);
