@@ -37,9 +37,11 @@ from app.services.intake_chat import continue_intake_chat
 from app.services.legal_research_chat import continue_legal_research_chat
 from app.services.review_report import render_review_report
 from app.services.request_auth import require_request_identity
+from app.services.review_jobs import ReviewJob, ReviewJobStore, ReviewJobWorker
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 API_VERSION = "2026.08.18-chat-intake"
+DEFAULT_REVIEW_JOB_DB = "data/review_jobs.sqlite3"
 MAX_KNOWLEDGE_SNAPSHOT_BYTES = int(
     os.getenv("MAX_KNOWLEDGE_SNAPSHOT_BYTES", str(250 * 1024 * 1024))
 )
@@ -76,6 +78,75 @@ app.add_middleware(
         "X-Review-Skipped-Modifications",
     ],
 )
+
+
+def job_runtime_config() -> dict[str, object]:
+    return {
+        "path": os.getenv("REVIEW_JOB_DB", DEFAULT_REVIEW_JOB_DB),
+        "retention_days": max(0, int(os.getenv("REVIEW_JOB_RETENTION_DAYS", "7"))),
+    }
+
+
+def _review_job_store() -> ReviewJobStore:
+    config = job_runtime_config()
+    path = str(config["path"])
+    current = getattr(app.state, "review_job_store", None)
+    if current is None or str(current.path) != str(Path(path)):
+        current = ReviewJobStore(path)
+        app.state.review_job_store = current
+    return current
+
+
+def _execute_deep_review_job(request: dict[str, object]) -> dict[str, object]:
+    parsed = DeepReviewRequest.model_validate(request)
+    result = review_contract_deeply(
+        contract_text=parsed.contract_text,
+        filename=parsed.filename,
+        settings=parsed.settings,
+    )
+    return result.model_dump(mode="json")
+
+
+def _job_summary(job: ReviewJob) -> dict[str, object]:
+    summary: dict[str, object] = {
+        "job_id": job.job_id,
+        "job_type": job.job_type,
+        "status": job.status,
+        "created_at": job.created_at,
+        "started_at": job.started_at,
+        "finished_at": job.finished_at,
+        "updated_at": job.updated_at,
+        "attempt_count": job.attempt_count,
+    }
+    if job.status == "succeeded":
+        summary["result"] = job.result
+    if job.status == "failed":
+        summary["error"] = job.error
+    return summary
+
+
+@app.on_event("startup")
+def start_review_job_worker() -> None:
+    store = _review_job_store()
+    store.recover_running_jobs()
+    store.cleanup_expired(int(job_runtime_config()["retention_days"]))
+    enabled = os.getenv("REVIEW_JOB_WORKER_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+    if enabled:
+        worker = ReviewJobWorker(
+            store,
+            _execute_deep_review_job,
+            poll_seconds=float(os.getenv("REVIEW_JOB_POLL_SECONDS", "1")),
+        )
+        worker.start()
+        app.state.review_job_worker = worker
+
+
+@app.on_event("shutdown")
+def stop_review_job_worker() -> None:
+    worker = getattr(app.state, "review_job_worker", None)
+    if worker is not None:
+        worker.stop()
+        app.state.review_job_worker = None
 
 
 @app.get("/health")
@@ -208,6 +279,34 @@ async def import_knowledge_snapshot(
         "collection_name": result.collection_name,
         "bytes_received": result.bytes_received,
     }
+
+
+@app.post("/api/review-jobs", status_code=status.HTTP_202_ACCEPTED)
+async def create_review_job(
+    request: DeepReviewRequest,
+    x_api_token: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> dict[str, object]:
+    tenant_id = require_request_identity(x_api_token, x_tenant_id)
+    job = _review_job_store().create_job(
+        tenant_id=tenant_id,
+        job_type="deep_review",
+        request=request.model_dump(mode="json"),
+    )
+    return _job_summary(job)
+
+
+@app.get("/api/review-jobs/{job_id}")
+async def get_review_job(
+    job_id: str,
+    x_api_token: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> dict[str, object]:
+    tenant_id = require_request_identity(x_api_token, x_tenant_id)
+    job = _review_job_store().get_job(job_id, tenant_id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Review job not found.")
+    return _job_summary(job)
 
 
 @app.post("/api/review", response_model=ReviewResponse)
