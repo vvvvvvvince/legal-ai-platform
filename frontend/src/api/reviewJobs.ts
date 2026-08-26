@@ -1,0 +1,77 @@
+export type ReviewJobStatus = "queued" | "running" | "succeeded" | "failed";
+
+export type ReviewJob = {
+  job_id: string;
+  job_type: string;
+  status: ReviewJobStatus;
+  created_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  updated_at: string;
+  attempt_count: number;
+  result?: unknown;
+  error?: string | null;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object";
+}
+
+export function normalizeReviewJob(payload: unknown): ReviewJob {
+  if (!isRecord(payload) || typeof payload.job_id !== "string") {
+    throw new Error("审查任务返回了无法识别的数据。");
+  }
+  const status = payload.status;
+  if (status !== "queued" && status !== "running" && status !== "succeeded" && status !== "failed") {
+    throw new Error("审查任务返回了无效状态。");
+  }
+  return {
+    job_id: payload.job_id,
+    job_type: typeof payload.job_type === "string" ? payload.job_type : "deep_review",
+    status,
+    created_at: typeof payload.created_at === "string" ? payload.created_at : "",
+    started_at: typeof payload.started_at === "string" ? payload.started_at : null,
+    finished_at: typeof payload.finished_at === "string" ? payload.finished_at : null,
+    updated_at: typeof payload.updated_at === "string" ? payload.updated_at : "",
+    attempt_count: typeof payload.attempt_count === "number" ? payload.attempt_count : 0,
+    result: payload.result,
+    error: typeof payload.error === "string" ? payload.error : null,
+  };
+}
+
+export function shouldPollReviewJob(status: ReviewJobStatus): boolean {
+  return status === "queued" || status === "running";
+}
+
+export function apiHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {
+    "X-Tenant-ID": import.meta.env.VITE_TENANT_ID || "local",
+  };
+  const apiToken = import.meta.env.VITE_API_AUTH_TOKEN;
+  if (apiToken) headers["X-API-Token"] = apiToken;
+  return headers;
+}
+
+export async function createReviewJob(request: unknown): Promise<ReviewJob> {
+  const response = await fetch("/api/review-jobs", {
+    method: "POST",
+    headers: { ...apiHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null) as { detail?: string } | null;
+    throw new Error(payload?.detail ?? `审查任务创建失败（${response.status}）。`);
+  }
+  return normalizeReviewJob(await response.json());
+}
+
+export async function getReviewJob(jobId: string): Promise<ReviewJob> {
+  const response = await fetch(`/api/review-jobs/${encodeURIComponent(jobId)}`, {
+    headers: apiHeaders(),
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null) as { detail?: string } | null;
+    throw new Error(payload?.detail ?? `审查任务查询失败（${response.status}）。`);
+  }
+  return normalizeReviewJob(await response.json());
+}

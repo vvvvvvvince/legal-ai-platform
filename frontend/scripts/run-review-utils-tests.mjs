@@ -6,7 +6,10 @@ const root = process.cwd();
 const outDir = path.join(root, ".test-dist");
 const utilSource = path.join(root, "src", "reviewUtils.ts");
 const utilOutput = path.join(outDir, "reviewUtils.js");
+const jobsSource = path.join(root, "src", "api", "reviewJobs.ts");
+const jobsOutput = path.join(outDir, "reviewJobs.js");
 const testFile = path.join(root, "tests", "review-utils.test.mjs");
+const jobsTestFile = path.join(root, "tests", "review-job-utils.test.mjs");
 
 const ts = await import(pathToFileURL(path.join(root, "node_modules", "typescript", "lib", "typescript.js")).href);
 
@@ -24,8 +27,19 @@ const transpiled = ts.transpileModule(sourceText, {
 
 await writeFile(utilOutput, transpiled.outputText, "utf8");
 
+const jobsSourceText = await readFile(jobsSource, "utf8");
+const jobsTranspiled = ts.transpileModule(jobsSourceText, {
+  compilerOptions: {
+    module: ts.ModuleKind.ES2022,
+    target: ts.ScriptTarget.ES2020
+  },
+  fileName: "reviewJobs.ts"
+});
+await writeFile(jobsOutput, jobsTranspiled.outputText, "utf8");
+
 try {
   await import(pathToFileURL(testFile).href);
+  await import(pathToFileURL(jobsTestFile).href);
 } finally {
   await rm(outDir, { recursive: true, force: true });
 }
