@@ -7,8 +7,11 @@ services:
       - ./backend/.env
     environment:
       QDRANT_URL: http://qdrant:6333
+      REVIEW_JOB_DB: /app/data/review_jobs.sqlite3
       NO_PROXY: qdrant,localhost,127.0.0.1
       no_proxy: qdrant,localhost,127.0.0.1
+    volumes:
+      - backend_data:/app/data
     ports:
       - "8000:8000"
     healthcheck:
@@ -45,4 +48,5 @@ services:
       - qdrant_storage:/qdrant/storage
 
 volumes:
+  backend_data:
   qdrant_storage:

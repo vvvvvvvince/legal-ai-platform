@@ -69,6 +69,13 @@ docker compose up --build
 Open `http://localhost:8080`. The frontend container serves the built React app
 with Nginx and proxies API traffic to the backend container.
 
+Deep review runs as a persistent background job. The UI submits to
+`POST /api/review-jobs`, polls `GET /api/review-jobs/{job_id}`, and resumes an
+unfinished job after a page refresh. Compose stores the SQLite job database in
+the named `backend_data` volume mounted at `/app/data`. The in-process worker
+uses one slot by default; set `REVIEW_JOB_RETENTION_DAYS` and
+`REVIEW_JOB_WORKER_CONCURRENCY` in `backend/.env` to adjust local behavior.
+
 When developing the frontend locally, keep `http://localhost:5173` reserved for
 Vite:
 
