@@ -11,6 +11,7 @@ import {
   isMissingClause,
   MISSING_SENTINEL
 } from "./reviewUtils";
+import { createReviewJob, waitForReviewJob } from "./api/reviewJobs";
 
 type RiskLevel = "high" | "medium" | "low";
 type RiskFilter = "all" | RiskLevel | "pending" | "processed";
@@ -2387,12 +2388,25 @@ export default function App() {
     setIsLoading(true);
     setError(null);
     try {
-      const result = await reviewContractDeeply(
-        contractOverview.filename,
-        contractOverview.contract_text,
-        settingsForReview as DeepReviewSettings,
-        contractOverview.document_quality ?? undefined,
-      );
+      const queuedJob = await createReviewJob({
+        filename: contractOverview.filename,
+        contract_text: contractOverview.contract_text,
+        settings: settingsForReview,
+        document_quality: contractOverview.document_quality ?? null,
+      });
+      setEditorNotice(queuedJob.status === "running" ? "深度审查正在执行，请稍候…" : "深度审查任务已排队，请稍候…");
+      window.localStorage.setItem("legal-ai-review-job", JSON.stringify({
+        job_id: queuedJob.job_id,
+        filename: contractOverview.filename,
+      }));
+      const completedJob = await waitForReviewJob(queuedJob.job_id);
+      if (completedJob.status === "failed") {
+        throw new Error(completedJob.error ?? "深度审查任务执行失败，请重试。");
+      }
+      if (!completedJob.result) {
+        throw new Error("深度审查任务未返回结果，请重试。");
+      }
+      const result = normalizeReviewResponse(completedJob.result, contractOverview.filename);
       if (workflowEpochRef.current !== workflowEpoch) return;
       if (!result.deep_review || result.deep_review.state !== "completed" || !result.deep_review.executive_summary.trim()) {
         throw new Error("深度审查未返回完整的审查说明，系统未开放修改与导出。");
@@ -2414,6 +2428,7 @@ export default function App() {
           ? `综合审查已完成；已自动定位并写入 ${autoApplied.modifications.length} 处可精确匹配的修改。右侧可逐项撤销；未唯一定位的建议保留为人工确认。`
           : "综合审查已完成。未发现可唯一定位的自动修改；请在右侧确认候选段落后再处理建议。"
       );
+      window.localStorage.removeItem("legal-ai-review-job");
     } catch (reviewError) {
       if (workflowEpochRef.current !== workflowEpoch) return;
       setError(getErrorMessage(reviewError));

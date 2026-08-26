@@ -43,6 +43,25 @@ export function shouldPollReviewJob(status: ReviewJobStatus): boolean {
   return status === "queued" || status === "running";
 }
 
+export async function waitForReviewJob(
+  jobId: string,
+  options: { intervalMs?: number; signal?: AbortSignal } = {},
+): Promise<ReviewJob> {
+  const intervalMs = Math.max(250, options.intervalMs ?? 2000);
+  while (true) {
+    if (options.signal?.aborted) throw new DOMException("Review job polling was cancelled.", "AbortError");
+    const job = await getReviewJob(jobId);
+    if (!shouldPollReviewJob(job.status)) return job;
+    await new Promise<void>((resolve, reject) => {
+      const timer = window.setTimeout(resolve, intervalMs);
+      options.signal?.addEventListener("abort", () => {
+        window.clearTimeout(timer);
+        reject(new DOMException("Review job polling was cancelled.", "AbortError"));
+      }, { once: true });
+    });
+  }
+}
+
 export function apiHeaders(): Record<string, string> {
   const headers: Record<string, string> = {
     "X-Tenant-ID": import.meta.env.VITE_TENANT_ID || "local",
