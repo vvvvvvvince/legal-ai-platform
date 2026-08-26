@@ -12,8 +12,12 @@ import {
   MISSING_SENTINEL
 } from "./reviewUtils";
 import { useReviewWorkflow } from "./hooks/useReviewWorkflow";
-import { apiHeaders, continueIntakeChat, continueLegalResearch, getContractOverview, isLegalResearchQuestion, normalizeReviewResponse } from "./api/legalApi";
+import { apiHeaders, continueIntakeChat, continueLegalResearch, getContractOverview, isLegalResearchQuestion } from "./api/legalApi";
+import { normalizeReviewResponse } from "./domain/reviewTransforms";
 import { ReviewJobStatus } from "./features/review/ReviewJobStatus";
+import { EditorPanel } from "./features/editor/EditorPanel";
+import { IntakePanel } from "./features/intake/IntakePanel";
+import { ReviewPanel } from "./features/review/ReviewPanel";
 
 import type { RiskLevel, RiskFilter, LawReference, ReviewRisk, ReviewCoverage, ReviewConsistencyCheck, DocumentQuality, DocumentPreflightCheck, PartyRole, ReviewStyle, DeepReviewSettings, DeepReviewOutput, ContractOverview, ContractOverviewResponse, IntakeChatMessage, IntakeReviewCriteria, IntakeChatResponse, LegalResearchResponse, ReviewResponse, Modification, FeedbackDecision, PreflightDecision, ParagraphOption, RiskWithKey, RiskLocationCandidate, ReviewStage, IntakeConversationStep, DeepReviewFormSettings } from "./domain/reviewTypes";
 
@@ -2078,63 +2082,20 @@ export default function App() {
         ) : null}
       </div>
 
-      <div className="legal-chat-dock">
-        {intakeChatWarning ? <p className="legal-chat-notice" role="status">{intakeChatWarning}</p> : null}
-        {error ? <p className="error-message legal-chat-error">{error}</p> : null}
-        <form
-          className="legal-chat-composer"
-          onSubmit={(event) => {
-            if (contractOverview) {
-              void sendIntakeChatMessage(event);
-              return;
-            }
-            event.preventDefault();
-            if (intakeChatDraft.trim()) void sendIntakeChatMessage();
-            else if (!file) fileInputRef.current?.click();
-          }}
-        >
-          <textarea
-            value={intakeChatDraft}
-            maxLength={2000}
-            disabled={isIntakeChatLoading || isLoading}
-            onChange={(event) => setIntakeChatDraft(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing || !intakeChatDraft.trim()) return;
-              event.preventDefault();
-              void sendIntakeChatMessage();
-            }}
-            placeholder={contractOverview ? "告诉 AI 您的立场、业务目标、顾虑，或直接查询相关法规…" : file ? "正在自动读取合同…" : "咨询法规、法条或合同问题；也可通过左侧上传文件"}
-          />
-          <div className="legal-chat-composer-actions">
-            <div className="legal-chat-composer-left-actions">
-              <button className="legal-chat-attach" type="button" disabled={isLoading || isIntakeChatLoading} onClick={() => fileInputRef.current?.click()}>
-                上传文件
-              </button>
-              <button
-                className="legal-chat-stop"
-                type="button"
-                disabled={!isLoading && !isIntakeChatLoading && !intakeChatDraft.trim() && intakeMessages[intakeMessages.length - 1]?.role !== "user"}
-                onClick={stopIntakeDraft}
-                title="终止当前输入或正在生成的回复"
-              >
-                终止
-              </button>
-            </div>
-            <button
-              className="legal-chat-send"
-              type="submit"
-              title="Enter"
-              aria-label="Enter"
-              disabled={isLoading || isIntakeChatLoading || !intakeChatDraft.trim()}
-            >
-              {isIntakeChatLoading ? "…" : "Enter"}
-            </button>
-          </div>
-        </form>
-        <div className="legal-chat-dock-footer">
-          <span>支持 DOCX / PDF，最大 10MB · 合同内容仅用于本次审查</span>
-        </div>
-      </div>
+      <IntakePanel
+        contractOverview={contractOverview}
+        file={file}
+        isLoading={isLoading}
+        isIntakeChatLoading={isIntakeChatLoading}
+        intakeChatDraft={intakeChatDraft}
+        intakeChatWarning={intakeChatWarning}
+        error={error}
+        canStop={isLoading || isIntakeChatLoading || Boolean(intakeChatDraft.trim()) || intakeMessages[intakeMessages.length - 1]?.role === "user"}
+        fileInputRef={fileInputRef}
+        onDraftChange={setIntakeChatDraft}
+        onSend={(event) => void sendIntakeChatMessage(event)}
+        onStop={stopIntakeDraft}
+      />
     </section>
   );
 
@@ -2150,7 +2111,7 @@ export default function App() {
             onChange={handleFileChange}
           />
 
-          {!review ? renderIntakeWorkspace() : (
+          {!review ? <>{renderIntakeWorkspace()}</> : (
         <section
           className={`workspace robin-review-workspace${isSidebarCollapsed ? " workspace-collapsed" : ""}`}
           aria-busy={isLoading}
@@ -2201,52 +2162,17 @@ export default function App() {
             <ReviewJobStatus job={activeJob} />
 
             {error ? <p className="error-message">{error}</p> : null}
-            <section className="editor-panel editor-panel-promoted" aria-label="合同正文编辑">
-              <div className="editor-heading">
-                <div>
-                  <h2>合同正文</h2>
-                </div>
-                <span>{editorText ? `${editorText.length} 字` : "未载入"}</span>
-              </div>
-
-              {manualInsertRiskKey ? (
-                <div className="editor-mode-banner" role="status" aria-live="polite">
-                  正在手动选择插入位置：点击正文中的目标段落，补充条款会插入到该段后面。
-                </div>
-              ) : null}
-
-              {reviewStage !== "modification" ? (
-                <div className="modification-locked-banner" role="status">
-                  正在完成综合审查，正文修改与最终导出将在结果生成后开放。
-                </div>
-              ) : null}
-
-              <div className="editor-toolbar" role="toolbar" aria-label="正文格式工具">
-                <button type="button" title="加粗" onMouseDown={(event) => event.preventDefault()} onClick={() => editor?.chain().focus().toggleBold().run()}><strong>B</strong></button>
-                <button type="button" title="斜体" onMouseDown={(event) => event.preventDefault()} onClick={() => editor?.chain().focus().toggleItalic().run()}><em>I</em></button>
-                <button type="button" title="下划线" onMouseDown={(event) => event.preventDefault()} onClick={() => editor?.chain().focus().toggleUnderline().run()}><u>U</u></button>
-                <button type="button" className="highlight-tool" title="黄色高亮" onMouseDown={(event) => event.preventDefault()} onClick={() => editor?.chain().focus().toggleHighlight({ color: "#fff19a" }).run()}>A</button>
-                <button type="button" className="text-color-tool" title="绿色文字" onMouseDown={(event) => event.preventDefault()} onClick={() => editor?.chain().focus().setColor("#146b49").run()}>A</button>
-                <button type="button" className="clear-format-tool" title="清除文字格式" onMouseDown={(event) => event.preventDefault()} onClick={() => editor?.chain().focus().unsetAllMarks().run()}>清除格式</button>
-                <span className="toolbar-divider" aria-hidden="true" />
-                <button type="button" title="撤销" onMouseDown={(event) => event.preventDefault()} onClick={() => editor?.chain().focus().undo().run()}>↶</button>
-                <button type="button" title="重做" onMouseDown={(event) => event.preventDefault()} onClick={() => editor?.chain().focus().redo().run()}>↷</button>
-              </div>
-
-              <div className={`editor-page editor-page-promoted${isSidebarCollapsed ? " editor-page-focus" : ""}`}>
-                <EditorContent editor={editor} />
-              </div>
-
-              <div className="export-row">
-                <div>
-                  <strong>{modifications.length}</strong>
-                  <span>条已接受修改</span>
-                </div>
-                <button className="primary-button" type="button" disabled={reviewStage !== "modification" || !canExport} onClick={() => void handleExport()}>
-                  {isExporting ? "导出中" : "导出 Word 审阅版"}
-                </button>
-              </div>
-            </section>
+            <EditorPanel
+              editor={editor}
+              editorText={editorText}
+              manualInsertRiskKey={manualInsertRiskKey}
+              reviewStage={reviewStage}
+              isSidebarCollapsed={isSidebarCollapsed}
+              modifications={modifications}
+              canExport={canExport}
+              isExporting={isExporting}
+              onExport={() => void handleExport()}
+            />
           </section>
 
           <aside className={`review-sidebar robin-review-sidebar${isSidebarCollapsed ? " review-sidebar-collapsed" : ""}`}>
@@ -2631,16 +2557,7 @@ export default function App() {
                   </details>
                 ) : null}
 
-                {reviewStage === "modification" && review.deep_review ? (
-                  <section className="deep-review-result" aria-label="深度审查结论">
-                    <div className="deep-review-heading"><div><strong>深度审查结论：{review.deep_review.overall_conclusion}</strong><span>{review.deep_review.settings_note}</span></div><b>已完成</b></div>
-                    <p>{review.deep_review.executive_summary}</p>
-                    {review.deep_review.key_facts.length ? <details open><summary>关键条款与结论</summary><div className="deep-result-list">{review.deep_review.key_facts.map((fact, index) => <article key={`${fact.item}-${index}`}><b>{fact.item}</b><span>{fact.contract_term}</span><small>{fact.conclusion}</small></article>)}</div></details> : null}
-                    {review.deep_review.missing_clauses.length ? <details><summary>需补充的条款</summary><ul>{review.deep_review.missing_clauses.map((item) => <li key={item}>{item}</li>)}</ul></details> : null}
-                    {review.deep_review.negotiation_items.length ? <details><summary>谈判清单</summary><div className="deep-result-list">{review.deep_review.negotiation_items.map((item, index) => <article key={`${item.topic}-${index}`}><b>{item.topic} · {item.owner}</b><span>目标：{item.target}</span><small>底线：{item.minimum_acceptable}</small></article>)}</div></details> : null}
-                    {review.deep_review.clarification_questions.length ? <details><summary>待业务确认</summary><ul>{review.deep_review.clarification_questions.map((item) => <li key={item}>{item}</li>)}</ul></details> : null}
-                  </section>
-                ) : null}
+                <ReviewPanel deepReview={review.deep_review} reviewStage={reviewStage} />
               </div>
             </section>
           </aside>
