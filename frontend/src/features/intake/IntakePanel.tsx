@@ -34,7 +34,7 @@ export function IntakePanel({ contractOverview, file, isLoading, isIntakeChatLoa
             disabled={!isBusy && !intakeChatDraft.trim()}
             onClick={isBusy ? onStop : undefined}
           >
-            {isBusy ? "终止" : "Enter"}
+            <span className="legal-chat-send-glyph" aria-hidden="true">{isBusy ? "■" : "↑"}</span>
           </button>
         </div>
       </form>

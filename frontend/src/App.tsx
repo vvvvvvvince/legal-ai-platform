@@ -17,6 +17,7 @@ import { normalizeReviewResponse } from "./domain/reviewTransforms";
 import { ReviewJobStatus } from "./features/review/ReviewJobStatus";
 import { EditorPanel } from "./features/editor/EditorPanel";
 import { IntakePanel } from "./features/intake/IntakePanel";
+import { LegalAssistantMark } from "./features/intake/LegalAssistantMark";
 import { ReviewPanel } from "./features/review/ReviewPanel";
 
 import type { RiskLevel, RiskFilter, LawReference, ReviewRisk, ReviewCoverage, ReviewConsistencyCheck, DocumentQuality, DocumentPreflightCheck, PartyRole, ReviewStyle, DeepReviewSettings, DeepReviewOutput, ContractOverview, ContractOverviewResponse, IntakeChatMessage, IntakeReviewCriteria, IntakeChatResponse, LegalResearchResponse, ReviewResponse, Modification, FeedbackDecision, PreflightDecision, ParagraphOption, RiskWithKey, RiskLocationCandidate, ReviewStage, IntakeConversationStep, DeepReviewFormSettings } from "./domain/reviewTypes";
@@ -1941,7 +1942,7 @@ export default function App() {
 
   const renderIntakeWorkspace = () => (
     <section
-      className="legal-chat-shell legal-chat-shell-openc"
+      className={`legal-chat-shell legal-chat-shell-openc${!file && !contractOverview && intakeMessages.length === 0 ? " legal-chat-shell-empty" : ""}`}
       aria-busy={isLoading || isIntakeChatLoading}
       onDragOver={(event) => event.preventDefault()}
       onDrop={(event) => {
@@ -1961,12 +1962,25 @@ export default function App() {
 
         {!contractOverview ? (
           <article className="legal-chat-message legal-chat-message-assistant">
-            <span className="legal-chat-message-avatar" aria-hidden="true">AI</span>
+            <LegalAssistantMark />
             <div className="legal-chat-message-body">
               <b>AI 法务助手</b>
               <p>{file ? "合同已加入会话，正在读取并提炼合同内容，随后开始确认审查方向。" : "您可以直接咨询法规、法条与合同问题；上传合同后，我会在不改变既定审查方案的前提下继续协助。"}</p>
             </div>
           </article>
+        ) : null}
+
+        {!contractOverview && !file && !isLoading ? (
+          <div className="legal-chat-starters" aria-label="常见法律问题">
+            <span>可以从这些问题开始</span>
+            <div>
+              {["审查付款与违约条款", "分析保密与知识产权", "查询合同解除条件"].map((question) => (
+                <button key={question} type="button" onClick={() => void submitIntakeChatAnswer(question)}>
+                  {question}
+                </button>
+              ))}
+            </div>
+          </div>
         ) : null}
 
         {file ? (
@@ -1984,14 +1998,14 @@ export default function App() {
 
         {isLoading && !contractOverview ? (
           <article className="legal-chat-message legal-chat-message-assistant legal-chat-message-working">
-            <span className="legal-chat-message-avatar" aria-hidden="true">AI</span>
+            <LegalAssistantMark thinking />
             <div className="legal-chat-message-body"><b>AI 法务助手</b><p>正在解析合同、识别交易结构并准备第一个问题…</p></div>
           </article>
         ) : null}
 
         {contractOverview ? (
           <article className="legal-chat-message legal-chat-message-assistant">
-            <span className="legal-chat-message-avatar" aria-hidden="true">AI</span>
+            <LegalAssistantMark />
             <div className="legal-chat-message-body legal-chat-overview-message">
               <b>合同已读取 · {contractOverview.overview.contract_type || "待确认合同类型"}</b>
               <p>{contractOverview.overview.summary}</p>
@@ -2013,7 +2027,7 @@ export default function App() {
             : [];
           return (
             <article className={`legal-chat-message legal-chat-message-${message.role}`} key={`${message.role}-${index}-${message.content.slice(0, 20)}`}>
-              {message.role === "assistant" ? <span className="legal-chat-message-avatar" aria-hidden="true">AI</span> : null}
+              {message.role === "assistant" ? <LegalAssistantMark /> : null}
               <div className="legal-chat-message-body">
                 <b>{message.role === "assistant" ? "AI 法务助手" : "您"}</b>
                 <p>{message.content}</p>
@@ -2055,7 +2069,7 @@ export default function App() {
 
         {isIntakeChatLoading ? (
           <article className="legal-chat-message legal-chat-message-assistant legal-chat-message-working">
-            <span className="legal-chat-message-avatar" aria-hidden="true">AI</span>
+            <LegalAssistantMark thinking />
             <div className="legal-chat-message-body"><b>AI 法务助手</b><p>{intakeMessages[intakeMessages.length - 1]?.intent === "legal_research" ? "正在整理法规信息与合同提示…" : "正在理解您的诉求并更新审核方案…"}</p></div>
           </article>
         ) : null}
