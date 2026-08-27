@@ -8,7 +8,7 @@ export function LegalAssistantMark({ thinking = false }: Props) {
       className={`legal-assistant-mark${thinking ? " legal-assistant-mark-thinking" : ""}`}
       aria-hidden="true"
     >
-      <img className="legal-assistant-robot-image" src="/assets/legal-assistant-bot-v1.png" alt="" />
+      <img className="legal-assistant-robot-image" src="/assets/legal-assistant-orbit-bot-v2.png" alt="" />
     </span>
   );
 }
