@@ -6458,9 +6458,35 @@ body {
   border-radius: 50%;
   color: #666b70;
   background: #f0f1f2;
-  font-size: 1.45rem;
-  font-weight: 400;
-  line-height: 1;
+}
+
+.legal-chat-attach-icon {
+  position: relative;
+  display: block;
+  width: 14px;
+  height: 14px;
+}
+
+.legal-chat-attach-icon::before,
+.legal-chat-attach-icon::after {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  border-radius: 999px;
+  background: currentColor;
+  content: "";
+}
+
+.legal-chat-attach-icon::before {
+  width: 12px;
+  height: 1.5px;
+  transform: translate(-50%, -50%);
+}
+
+.legal-chat-attach-icon::after {
+  width: 1.5px;
+  height: 12px;
+  transform: translate(-50%, -50%);
 }
 
 #root .legal-chat-shell-openc .legal-chat-composer-actions .legal-chat-attach:hover:not(:disabled) {

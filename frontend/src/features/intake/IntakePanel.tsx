@@ -24,7 +24,7 @@ export function IntakePanel({ contractOverview, file, isLoading, isIntakeChatLoa
         <textarea value={intakeChatDraft} maxLength={2000} disabled={isIntakeChatLoading || isLoading} onChange={(event: ChangeEvent<HTMLTextAreaElement>) => onDraftChange(event.target.value)} onKeyDown={(event) => { if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing || !intakeChatDraft.trim()) return; event.preventDefault(); onSend(); }} placeholder={contractOverview ? "告诉 AI 您的立场、业务目标、顾虑，或直接查询相关法规…" : file ? "正在自动读取合同…" : "咨询法规、法条或合同问题；也可通过左侧上传文件"} />
         <div className="legal-chat-composer-actions">
           <div className="legal-chat-composer-left-actions">
-            <button className="legal-chat-attach" type="button" disabled={isBusy} onClick={() => fileInputRef.current?.click()} aria-label="上传文件" title="上传文件">+</button>
+            <button className="legal-chat-attach" type="button" disabled={isBusy} onClick={() => fileInputRef.current?.click()} aria-label="上传文件" title="上传文件"><span className="legal-chat-attach-icon" aria-hidden="true" /></button>
           </div>
           <button
             className={`legal-chat-send${isBusy ? " legal-chat-send-stop" : ""}`}
