@@ -6477,6 +6477,14 @@ body {
 }
 
 /* Refined legal-assistant identity and focused chat composition. */
+.legal-chat-shell-openc {
+  --legal-ink: #203342;
+  --legal-accent: #2f6673;
+  --legal-accent-hover: #255460;
+  --legal-accent-soft: #edf5f6;
+  --legal-accent-border: #9bb8bf;
+}
+
 #root .legal-chat-shell-openc .legal-chat-timeline,
 #root .legal-chat-shell-openc .legal-chat-dock {
   padding-right: max(24px, calc((100% - 960px) / 2));
@@ -6514,6 +6522,7 @@ body {
 
 .legal-chat-welcome h1 {
   max-width: 11em;
+  color: var(--legal-ink);
   font-size: clamp(2rem, 4vw, 2.7rem);
   line-height: 1.08;
 }
@@ -6534,13 +6543,13 @@ body {
 }
 
 #root .legal-chat-shell-openc .legal-chat-message-body > b {
-  color: #62676c;
+  color: #4d6872;
   font-size: 0.76rem;
   font-weight: 650;
 }
 
 #root .legal-chat-shell-openc .legal-chat-message-body p {
-  color: #202327;
+  color: #263943;
   font-size: 0.94rem;
   line-height: 1.72;
 }
@@ -6553,11 +6562,11 @@ body {
   height: 34px;
   margin-top: 1px;
   place-items: center;
-  border: 1px solid #292c2f;
+  border: 1px solid #285865;
   border-radius: 11px;
   color: #fff;
-  background: #1d2023;
-  box-shadow: inset 0 1px 0 rgb(255 255 255 / 12%);
+  background: var(--legal-accent);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 18%), 0 4px 12px rgb(47 102 115 / 16%);
 }
 
 .legal-assistant-mark > span {
@@ -6572,8 +6581,8 @@ body {
   position: absolute;
   inset: -4px;
   border: 1.5px solid transparent;
-  border-top-color: #2c3034;
-  border-right-color: #aeb3b7;
+  border-top-color: var(--legal-accent);
+  border-right-color: #8fb9c2;
   border-radius: 14px;
   opacity: 0;
   content: "";
@@ -6619,8 +6628,9 @@ body {
 }
 
 .legal-chat-starters button:hover {
-  border-color: #bfc2c5;
-  background: #efeff0;
+  border-color: var(--legal-accent-border);
+  color: var(--legal-accent-hover);
+  background: var(--legal-accent-soft);
 }
 
 .legal-chat-starters button:active {
@@ -6635,8 +6645,8 @@ body {
 }
 
 #root .legal-chat-shell-openc .legal-chat-composer:focus-within {
-  border-color: #9da2a6;
-  box-shadow: 0 14px 38px rgb(28 32 35 / 11%);
+  border-color: var(--legal-accent-border);
+  box-shadow: 0 14px 38px rgb(47 102 115 / 13%);
 }
 
 #root .legal-chat-shell-openc .legal-chat-composer-actions .legal-chat-send {
@@ -6649,13 +6659,13 @@ body {
   place-items: center;
   border-radius: 50%;
   color: #fff;
-  background: #1d2023;
-  box-shadow: 0 4px 12px rgb(29 32 35 / 18%);
+  background: var(--legal-accent);
+  box-shadow: 0 4px 14px rgb(47 102 115 / 24%);
 }
 
 #root .legal-chat-shell-openc .legal-chat-composer-actions .legal-chat-send:hover:not(:disabled) {
   color: #fff;
-  background: #08090a;
+  background: var(--legal-accent-hover);
   transform: translateY(-1px);
 }
 
