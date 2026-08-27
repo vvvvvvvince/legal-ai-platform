@@ -18,6 +18,7 @@ import { ReviewJobStatus } from "./features/review/ReviewJobStatus";
 import { EditorPanel } from "./features/editor/EditorPanel";
 import { IntakePanel } from "./features/intake/IntakePanel";
 import { LegalAssistantMark } from "./features/intake/LegalAssistantMark";
+import { LegalUserMark } from "./features/intake/LegalUserMark";
 import { ReviewPanel } from "./features/review/ReviewPanel";
 
 import type { RiskLevel, RiskFilter, LawReference, ReviewRisk, ReviewCoverage, ReviewConsistencyCheck, DocumentQuality, DocumentPreflightCheck, PartyRole, ReviewStyle, DeepReviewSettings, DeepReviewOutput, ContractOverview, ContractOverviewResponse, IntakeChatMessage, IntakeReviewCriteria, IntakeChatResponse, LegalResearchResponse, ReviewResponse, Modification, FeedbackDecision, PreflightDecision, ParagraphOption, RiskWithKey, RiskLocationCandidate, ReviewStage, IntakeConversationStep, DeepReviewFormSettings } from "./domain/reviewTypes";
@@ -2029,7 +2030,7 @@ export default function App() {
             <article className={`legal-chat-message legal-chat-message-${message.role}`} key={`${message.role}-${index}-${message.content.slice(0, 20)}`}>
               {message.role === "assistant" ? <LegalAssistantMark /> : null}
               <div className="legal-chat-message-body">
-                <b>{message.role === "assistant" ? "AI 法务助手" : "您"}</b>
+                {message.role === "assistant" ? <b>AI 法务助手</b> : null}
                 <p>{message.content}</p>
                 {quickReplies.length ? (
                   <div className="legal-chat-quick-replies" aria-label="快捷回答">
@@ -2063,6 +2064,7 @@ export default function App() {
                   </div>
                 ) : null}
               </div>
+              {message.role === "user" ? <LegalUserMark /> : null}
             </article>
           );
         })}
