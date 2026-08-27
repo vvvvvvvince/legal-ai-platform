@@ -15,7 +15,7 @@ export function LegalAssistantMark({ thinking = false }: Props) {
           <span className="legal-assistant-robot-eye" />
           <span className="legal-assistant-robot-eye" />
         </span>
-        <span className="legal-assistant-robot-status" />
+        <span className="legal-assistant-robot-smile" />
       </span>
       <span className="legal-assistant-robot-ear legal-assistant-robot-ear-right" />
     </span>

@@ -10,7 +10,7 @@ test("assistant mark uses a text-free robot structure", async () => {
   assert.doesNotMatch(source, />\s*律\s*</);
   assert.match(source, /legal-assistant-robot-head/);
   assert.match(source, /legal-assistant-robot-eye/);
-  assert.match(source, /legal-assistant-robot-status/);
+  assert.match(source, /legal-assistant-robot-smile/);
 });
 
 test("assistant mark preserves the thinking state", async () => {
