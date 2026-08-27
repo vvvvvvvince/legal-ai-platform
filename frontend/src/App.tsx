@@ -2090,7 +2090,7 @@ export default function App() {
         intakeChatDraft={intakeChatDraft}
         intakeChatWarning={intakeChatWarning}
         error={error}
-        canStop={isLoading || isIntakeChatLoading || Boolean(intakeChatDraft.trim()) || intakeMessages[intakeMessages.length - 1]?.role === "user"}
+        isBusy={isLoading || isIntakeChatLoading || intakeMessages[intakeMessages.length - 1]?.role === "user"}
         fileInputRef={fileInputRef}
         onDraftChange={setIntakeChatDraft}
         onSend={(event) => void sendIntakeChatMessage(event)}

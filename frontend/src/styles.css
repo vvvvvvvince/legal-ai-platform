@@ -6444,3 +6444,34 @@ body {
     padding: 0 10px;
   }
 }
+
+/* Composer action lock: upload is a compact secondary action, while the
+   right-hand action switches between send and stop in the same position. */
+#root .legal-chat-shell-openc .legal-chat-composer-actions .legal-chat-attach {
+  display: grid;
+  width: 36px;
+  min-width: 36px;
+  height: 36px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid #dedede;
+  border-radius: 50%;
+  color: #666b70;
+  background: #f0f1f2;
+  font-size: 1.45rem;
+  font-weight: 400;
+  line-height: 1;
+}
+
+#root .legal-chat-shell-openc .legal-chat-composer-actions .legal-chat-attach:hover:not(:disabled) {
+  border-color: #c9cbcd;
+  color: #34383c;
+  background: #e6e7e8;
+}
+
+#root .legal-chat-shell-openc .legal-chat-composer-actions .legal-chat-send-stop,
+#root .legal-chat-shell-openc .legal-chat-composer-actions .legal-chat-send-stop:hover:not(:disabled) {
+  border-color: #202020;
+  color: #fff;
+  background: #202020;
+}
