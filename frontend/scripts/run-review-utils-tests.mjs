@@ -10,6 +10,7 @@ const jobsSource = path.join(root, "src", "api", "reviewJobs.ts");
 const jobsOutput = path.join(outDir, "reviewJobs.js");
 const testFile = path.join(root, "tests", "review-utils.test.mjs");
 const jobsTestFile = path.join(root, "tests", "review-job-utils.test.mjs");
+const assistantMarkTestFile = path.join(root, "tests", "legal-assistant-mark.test.mjs");
 
 const ts = await import(pathToFileURL(path.join(root, "node_modules", "typescript", "lib", "typescript.js")).href);
 
@@ -40,6 +41,7 @@ await writeFile(jobsOutput, jobsTranspiled.outputText, "utf8");
 try {
   await import(pathToFileURL(testFile).href);
   await import(pathToFileURL(jobsTestFile).href);
+  await import(pathToFileURL(assistantMarkTestFile).href);
 } finally {
   await rm(outDir, { recursive: true, force: true });
 }
