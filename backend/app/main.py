@@ -39,7 +39,7 @@ from app.services.review_report import render_review_report
 from app.services.request_auth import require_request_identity
 from app.services.review_jobs import ReviewJob, ReviewJobStore, ReviewJobWorker
 
-MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 API_VERSION = "2026.08.18-chat-intake"
 DEFAULT_REVIEW_JOB_DB = "data/review_jobs.sqlite3"
 MAX_KNOWLEDGE_SNAPSHOT_BYTES = int(
@@ -333,7 +333,7 @@ async def review_contract(
     if len(file_bytes) > MAX_UPLOAD_BYTES:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail="Uploaded file must be 10 MB or smaller.",
+            detail="Uploaded file must be 50 MB or smaller.",
         )
 
     contract_text, document_quality = _parse_contract_document(file_bytes, file.filename)
@@ -394,7 +394,7 @@ async def contract_overview(
     if not file_bytes:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty.")
     if len(file_bytes) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Uploaded file must be 10 MB or smaller.")
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Uploaded file must be 50 MB or smaller.")
     contract_text, document_quality = _parse_contract_document(file_bytes, file.filename)
     overview = await run_in_threadpool(create_contract_overview, contract_text)
     return ContractOverviewResponse(filename=file.filename, contract_text=contract_text, overview=overview, document_quality=document_quality)
@@ -503,7 +503,7 @@ async def export_reviewed_contract(
     if len(file_bytes) > MAX_UPLOAD_BYTES:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail="Uploaded file must be 10 MB or smaller.",
+            detail="Uploaded file must be 50 MB or smaller.",
         )
 
     try:

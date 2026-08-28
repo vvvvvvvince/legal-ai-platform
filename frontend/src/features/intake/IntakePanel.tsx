@@ -38,7 +38,7 @@ export function IntakePanel({ contractOverview, file, isLoading, isIntakeChatLoa
           </button>
         </div>
       </form>
-      <div className="legal-chat-dock-footer"><span>支持 DOCX / PDF，最大 10MB · 合同内容仅用于本次审查</span></div>
+      <div className="legal-chat-dock-footer"><span>支持 DOCX / PDF，最大 50MB · 合同内容仅用于本次审查</span></div>
     </div>
   );
 }
