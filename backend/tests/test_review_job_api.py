@@ -4,6 +4,7 @@ import time
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.services.auth_store import AuthStore
 from app.services.review_jobs import ReviewJobStore, ReviewJobWorker
 
 
@@ -49,6 +50,44 @@ def test_create_review_job_returns_202_and_tenant_filters_lookup(monkeypatch, tm
             headers={"X-Tenant-ID": "other"},
         )
         assert other_tenant.status_code == 404
+
+
+def test_shared_workspace_modifications_keep_the_user_who_made_each_change(monkeypatch, tmp_path):
+    auth_db = tmp_path / "auth.sqlite3"
+    job_db = tmp_path / "jobs.sqlite3"
+    monkeypatch.setenv("AUTH_DB", str(auth_db))
+    monkeypatch.setenv("REVIEW_JOB_DB", str(job_db))
+    monkeypatch.setenv("REVIEW_JOB_WORKER_ENABLED", "false")
+    auth = AuthStore(auth_db)
+    auth.create_user("alice", "甲同事", "correct-password")
+    auth.create_user("bob", "乙同事", "correct-password")
+
+    with TestClient(app) as client:
+        assert client.post("/api/auth/login", json={"username": "alice", "password": "correct-password"}).status_code == 200
+        job = client.post("/api/review-jobs", json=_payload()).json()
+        first = client.post(
+            f"/api/review-jobs/{job['job_id']}/modifications",
+            json={"risk_key": "payment", "original": "先付款", "modified": "验收后付款"},
+        )
+        assert first.status_code == 201
+        assert first.json()["actor_display_name"] == "甲同事"
+
+        client.post("/api/auth/logout")
+        assert client.post("/api/auth/login", json={"username": "bob", "password": "correct-password"}).status_code == 200
+        shared = client.get(f"/api/review-jobs/{job['job_id']}/modifications")
+        assert shared.status_code == 200
+        assert shared.json()[0]["actor_display_name"] == "甲同事"
+
+        replacement = client.post(
+            f"/api/review-jobs/{job['job_id']}/modifications",
+            json={"risk_key": "payment", "original": "先付款", "modified": "验收后 30 日付款"},
+        )
+        assert replacement.status_code == 201
+        assert replacement.json()["actor_display_name"] == "乙同事"
+        assert client.post(
+            f"/api/review-jobs/{job['job_id']}/modifications/{replacement.json()['modification_id']}/revert"
+        ).status_code == 200
+        assert client.get(f"/api/review-jobs/{job['job_id']}/modifications").json() == []
 
 
 def test_worker_persists_successful_result(tmp_path):

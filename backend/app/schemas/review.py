@@ -25,6 +25,17 @@ class LawReference(BaseModel):
     effectiveness_status: str | None = None
 
 
+class ReviewModificationInput(BaseModel):
+    item: str | None = Field(default=None, max_length=160)
+    risk_key: str | None = Field(default=None, max_length=300)
+    original: str = Field(min_length=1, max_length=20_000)
+    modified: str = Field(max_length=20_000)
+    revision_id: str | None = Field(default=None, max_length=300)
+    anchor_text: str | None = Field(default=None, max_length=20_000)
+    insert_after_text: str | None = Field(default=None, max_length=20_000)
+    paragraph_context: str | None = Field(default=None, max_length=20_000)
+
+
 class ReviewRisk(BaseModel):
     item: str = Field(..., description="Reviewed contract topic")
     level: RiskLevel

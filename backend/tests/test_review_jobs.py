@@ -144,3 +144,39 @@ def test_old_status_constraint_is_migrated_without_losing_jobs(tmp_path):
 
     assert cancelled.status == "cancelled"
     assert store.get_job("legacy", "shared") is not None
+
+
+def test_modifications_are_scoped_to_job_and_keep_audited_authors(tmp_path):
+    store = ReviewJobStore(tmp_path / "jobs.sqlite3")
+    job = store.create_job(tenant_id="shared", job_type="deep_review", request={})
+
+    first = store.save_modification(
+        job.job_id,
+        "shared",
+        {"risk_key": "payment", "original": "先付款", "modified": "验收后付款"},
+        actor_user_id="user-a",
+        actor_display_name="甲同事",
+    )
+    replacement = store.save_modification(
+        job.job_id,
+        "shared",
+        {"risk_key": "payment", "original": "先付款", "modified": "验收后 30 日付款"},
+        actor_user_id="user-b",
+        actor_display_name="乙同事",
+    )
+
+    active = store.list_modifications(job.job_id, "shared")
+    assert [item.modification_id for item in active] == [replacement.modification_id]
+    assert active[0].actor_display_name == "乙同事"
+    assert store.get_modification(first.modification_id, "shared").status == "superseded"
+
+    reverted = store.revert_modification(
+        replacement.modification_id,
+        "shared",
+        actor_user_id="user-a",
+        actor_display_name="甲同事",
+    )
+    assert reverted and reverted.status == "reverted"
+    assert store.list_modifications(job.job_id, "shared") == []
+    assert [event.action for event in store.list_modification_events(replacement.modification_id, "shared")] == ["accepted", "reverted"]
+    assert store.list_modifications(job.job_id, "other") == []

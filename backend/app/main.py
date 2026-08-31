@@ -21,6 +21,7 @@ from app.schemas.review import (
     LegalResearchRequest,
     LegalResearchResponse,
     ReviewFeedback,
+    ReviewModificationInput,
     ReviewResponse,
     TextReviewRequest,
 )
@@ -48,7 +49,7 @@ from app.services.request_auth import (
     reset_current_identity,
     set_current_identity,
 )
-from app.services.review_jobs import IdempotencyConflict, ReviewJob, ReviewJobStore, ReviewJobWorker
+from app.services.review_jobs import IdempotencyConflict, ReviewJob, ReviewJobStore, ReviewJobWorker, ReviewModification
 
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 API_VERSION = "2026.08.18-chat-intake"
@@ -186,6 +187,20 @@ def _job_summary(job: ReviewJob) -> dict[str, object]:
     if job.status in {"failed", "cancelled"}:
         summary["error"] = job.error
     return summary
+
+
+def _modification_summary(modification: ReviewModification) -> dict[str, object]:
+    return {
+        "modification_id": modification.modification_id,
+        "job_id": modification.job_id,
+        "status": modification.status,
+        "risk_key": modification.risk_key,
+        "modification": modification.payload,
+        "actor_user_id": modification.actor_user_id,
+        "actor_display_name": modification.actor_display_name,
+        "created_at": modification.created_at,
+        "updated_at": modification.updated_at,
+    }
 
 
 def _identity_payload(identity: RequestIdentity) -> dict[str, str]:
@@ -424,6 +439,61 @@ async def get_review_job(
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Review job not found.")
     return _job_summary(job)
+
+
+@app.get("/api/review-jobs/{job_id}/modifications")
+async def list_review_job_modifications(
+    job_id: str,
+    x_api_token: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> list[dict[str, object]]:
+    identity = require_request_identity(x_api_token, x_tenant_id)
+    if _review_job_store().get_job(job_id, identity.workspace_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Review job not found.")
+    return [
+        _modification_summary(modification)
+        for modification in _review_job_store().list_modifications(job_id, identity.workspace_id)
+    ]
+
+
+@app.post("/api/review-jobs/{job_id}/modifications", status_code=status.HTTP_201_CREATED)
+async def save_review_job_modification(
+    job_id: str,
+    modification: ReviewModificationInput,
+    x_api_token: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> dict[str, object]:
+    identity = require_request_identity(x_api_token, x_tenant_id)
+    try:
+        saved = _review_job_store().save_modification(
+            job_id,
+            identity.workspace_id,
+            modification.model_dump(exclude_none=True),
+            actor_user_id=identity.user_id,
+            actor_display_name=identity.display_name,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Review job not found.") from exc
+    return _modification_summary(saved)
+
+
+@app.post("/api/review-jobs/{job_id}/modifications/{modification_id}/revert")
+async def revert_review_job_modification(
+    job_id: str,
+    modification_id: str,
+    x_api_token: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> dict[str, object]:
+    identity = require_request_identity(x_api_token, x_tenant_id)
+    reverted = _review_job_store().revert_modification(
+        modification_id,
+        identity.workspace_id,
+        actor_user_id=identity.user_id,
+        actor_display_name=identity.display_name,
+    )
+    if reverted is None or reverted.job_id != job_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Review modification not found.")
+    return _modification_summary(reverted)
 
 
 @app.post("/api/review", response_model=ReviewResponse)
