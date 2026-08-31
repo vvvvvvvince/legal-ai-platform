@@ -7,6 +7,8 @@ from fastapi.testclient import TestClient
 from lxml import etree
 
 from app.main import app
+from app.services.auth_store import AuthStore
+from app.services.docx_modifier import modify_docx_inplace
 
 
 client = TestClient(app)
@@ -93,6 +95,46 @@ def test_export_returns_modified_docx() -> None:
     assert document_xml.find(".//w:ins", W_NS) is not None
     assert document_xml.find(".//w:del", W_NS) is not None
     assert settings_xml.find(".//w:trackRevisions", W_NS) is not None
+
+
+def test_tracked_export_uses_the_modification_author() -> None:
+    result = modify_docx_inplace(
+        _build_docx_bytes(),
+        [{
+            "original": "合同份数：一式两份。",
+            "modified": "合同份数：一式四份。",
+            "author_display_name": "甲同事",
+        }],
+    )
+
+    document_xml = _read_docx_xml(result.content, "word/document.xml")
+    authors = document_xml.xpath(".//w:ins/@w:author | .//w:del/@w:author", namespaces=W_NS)
+    assert authors == ["甲同事", "甲同事"]
+
+
+def test_export_uses_the_authenticated_user_not_a_client_supplied_author(monkeypatch, tmp_path) -> None:
+    auth_db = tmp_path / "auth.sqlite3"
+    monkeypatch.setenv("AUTH_DB", str(auth_db))
+    monkeypatch.setenv("REVIEW_JOB_WORKER_ENABLED", "false")
+    AuthStore(auth_db).create_user("alice", "甲同事", "correct-password")
+
+    with TestClient(app) as authenticated_client:
+        assert authenticated_client.post(
+            "/api/auth/login", json={"username": "alice", "password": "correct-password"}
+        ).status_code == 200
+        response = authenticated_client.post(
+            "/api/export",
+            files={"file": ("contract.docx", _build_docx_bytes(), "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+            data={"modifications": json.dumps([{
+                "original": "合同份数：一式两份。",
+                "modified": "合同份数：一式四份。",
+                "author_display_name": "伪造作者",
+            }], ensure_ascii=False)},
+        )
+
+    assert response.status_code == 200
+    document_xml = _read_docx_xml(response.content, "word/document.xml")
+    assert document_xml.xpath(".//w:ins/@w:author", namespaces=W_NS) == ["甲同事"]
 
 
 def test_tracked_export_preserves_multiple_revisions_in_one_paragraph() -> None:

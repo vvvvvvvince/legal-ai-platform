@@ -173,6 +173,7 @@ def test_modifications_are_scoped_to_job_and_keep_audited_authors(tmp_path):
     reverted = store.revert_modification(
         replacement.modification_id,
         "shared",
+        job_id=job.job_id,
         actor_user_id="user-a",
         actor_display_name="甲同事",
     )
@@ -180,3 +181,27 @@ def test_modifications_are_scoped_to_job_and_keep_audited_authors(tmp_path):
     assert store.list_modifications(job.job_id, "shared") == []
     assert [event.action for event in store.list_modification_events(replacement.modification_id, "shared")] == ["accepted", "reverted"]
     assert store.list_modifications(job.job_id, "other") == []
+
+
+def test_revert_does_not_cross_review_job_boundaries(tmp_path):
+    store = ReviewJobStore(tmp_path / "jobs.sqlite3")
+    first_job = store.create_job(tenant_id="shared", job_type="deep_review", request={})
+    second_job = store.create_job(tenant_id="shared", job_type="deep_review", request={})
+    modification = store.save_modification(
+        second_job.job_id,
+        "shared",
+        {"original": "先付款", "modified": "验收后付款"},
+        actor_user_id="user-a",
+        actor_display_name="甲同事",
+    )
+
+    reverted = store.revert_modification(
+        modification.modification_id,
+        "shared",
+        job_id=first_job.job_id,
+        actor_user_id="user-a",
+        actor_display_name="甲同事",
+    )
+
+    assert reverted is None
+    assert store.get_modification(modification.modification_id, "shared").status == "active"

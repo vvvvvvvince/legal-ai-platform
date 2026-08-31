@@ -400,6 +400,7 @@ class ReviewJobStore:
         modification_id: str,
         tenant_id: str,
         *,
+        job_id: str,
         actor_user_id: str,
         actor_display_name: str,
     ) -> ReviewModification | None:
@@ -408,8 +409,8 @@ class ReviewJobStore:
             connection.execute("BEGIN IMMEDIATE")
             cursor = connection.execute(
                 """UPDATE review_modifications SET status = 'reverted', updated_at = ?
-                   WHERE modification_id = ? AND tenant_id = ? AND status = 'active'""",
-                (now, modification_id, tenant_id),
+                   WHERE modification_id = ? AND job_id = ? AND tenant_id = ? AND status = 'active'""",
+                (now, modification_id, job_id, tenant_id),
             )
             if cursor.rowcount != 1:
                 connection.commit()

@@ -14,6 +14,7 @@ import {
 import { useReviewWorkflow } from "./hooks/useReviewWorkflow";
 import { useAuth } from "./hooks/useAuth";
 import { apiHeaders, continueIntakeChat, continueLegalResearch, getContractOverview, isLegalResearchQuestion } from "./api/legalApi";
+import { listReviewModifications, revertReviewModification, saveReviewModification } from "./api/reviewJobs";
 import { normalizeReviewResponse } from "./domain/reviewTransforms";
 import { ReviewJobStatus } from "./features/review/ReviewJobStatus";
 import { EditorPanel } from "./features/editor/EditorPanel";
@@ -754,11 +755,12 @@ function removeRevisionMarkup(html: string, revisionId: string) {
   return container.innerHTML;
 }
 
-async function exportReviewedContract(file: File, modifications: Modification[]) {
+async function exportReviewedContract(file: File, modifications: Modification[], reviewJobId?: string) {
   const formData = new FormData();
   formData.append("file", file);
   formData.append("modifications", JSON.stringify(modifications));
   formData.append("export_mode", "tracked");
+  if (reviewJobId) formData.append("review_job_id", reviewJobId);
 
   const response = await fetch("/api/export", {
     method: "POST",
@@ -872,6 +874,54 @@ export default function App() {
   // intake and deep-review calls keep the session number they started with so
   // an older response can never overwrite a newer contract's workspace.
   const workflowEpochRef = useRef(0);
+
+  useEffect(() => {
+    if (reviewStage !== "modification" || !activeJob?.job_id) return;
+    let cancelled = false;
+    void listReviewModifications(activeJob.job_id).then((saved) => {
+      if (cancelled) return;
+      const remote = saved.map((item): Modification => ({
+        ...item.modification,
+        modification_id: item.modification_id,
+        actor_user_id: item.actor_user_id,
+        actor_display_name: item.actor_display_name,
+      }));
+      setModifications((previous) => [
+        ...previous.filter((item) => !remote.some((savedItem) => isSameModification(item, savedItem))),
+        ...remote,
+      ]);
+    }).catch((reason: unknown) => {
+      if (!cancelled) setError(getErrorMessage(reason));
+    });
+    return () => { cancelled = true; };
+  }, [activeJob?.job_id, reviewStage]);
+
+  function isSameModification(left: Modification, right: Modification) {
+    if (left.modification_id && right.modification_id) return left.modification_id === right.modification_id;
+    if (left.revision_id && right.revision_id) return left.revision_id === right.revision_id;
+    return left.risk_key === right.risk_key && left.original === right.original && left.modified === right.modified;
+  }
+
+  function saveModificationInBackground(modification: Modification, jobId = activeJob?.job_id) {
+    const local = {
+      ...modification,
+      actor_user_id: auth.identity?.user_id ?? "pending-session",
+      actor_display_name: auth.identity?.display_name ?? "当前用户",
+    };
+    setModifications((previous) => previous.map((item) => isSameModification(item, modification) ? local : item));
+    if (!jobId) return;
+    void saveReviewModification(jobId, local).then((saved) => {
+      const persisted: Modification = {
+        ...saved.modification,
+        modification_id: saved.modification_id,
+        actor_user_id: saved.actor_user_id,
+        actor_display_name: saved.actor_display_name,
+      };
+      setModifications((previous) => previous.map((item) => isSameModification(item, modification) ? persisted : item));
+    }).catch((reason: unknown) => {
+      setError(getErrorMessage(reason));
+    });
+  }
 
   const sortedRisks = useMemo(() => {
     return [...(review?.risks ?? [])].sort((left, right) => levelOrder[left.level] - levelOrder[right.level]);
@@ -1403,18 +1453,20 @@ export default function App() {
     setEditorNotice(
       anchorMeta ? `已在指定段落后追加“${risk.item}”的补充条款。` : `已追加“${risk.item}”的补充条款到合同末尾。`
     );
+    const modification: Modification = {
+      item: risk.item,
+      risk_key: riskKey,
+      original: MISSING_SENTINEL,
+      modified: risk.suggestion,
+      revision_id: revisionId,
+      anchor_text: risk.anchor_text ?? null,
+      insert_after_text: anchorText ?? risk.insert_after_text ?? risk.anchor_text ?? null
+    };
     setModifications((previous) => [
       ...previous.filter((item) => !isRiskModification(item, risk, riskKey)),
-      {
-        item: risk.item,
-        risk_key: riskKey,
-        original: MISSING_SENTINEL,
-        modified: risk.suggestion,
-        revision_id: revisionId,
-        anchor_text: risk.anchor_text ?? null,
-        insert_after_text: anchorText ?? risk.insert_after_text ?? risk.anchor_text ?? null
-      }
+      modification
     ]);
+    saveModificationInBackground(modification);
     void submitFeedback(risk, riskKey, "edited", risk.suggestion);
 
     const insertedOffset = nextParagraphs.slice(0, insertAtIndex).join("\n").length + (insertAtIndex > 0 ? 1 : 0);
@@ -1459,19 +1511,21 @@ export default function App() {
     });
     setError(null);
     setEditorNotice(`已在您确认的段落中引用“${risk.item}”的修改建议。`);
+    const modification: Modification = {
+      item: risk.item,
+      risk_key: riskKey,
+      original,
+      modified: risk.suggestion,
+      revision_id: revisionId,
+      anchor_text: risk.anchor_text ?? null,
+      insert_after_text: risk.insert_after_text ?? null,
+      paragraph_context: paragraphText,
+    };
     setModifications((previous) => [
       ...previous.filter((item) => !isRiskModification(item, risk, riskKey)),
-      {
-        item: risk.item,
-        risk_key: riskKey,
-        original,
-        modified: risk.suggestion,
-        revision_id: revisionId,
-        anchor_text: risk.anchor_text ?? null,
-        insert_after_text: risk.insert_after_text ?? null,
-        paragraph_context: paragraphText,
-      }
+      modification
     ]);
+    saveModificationInBackground(modification);
     void submitFeedback(risk, riskKey, "edited", risk.suggestion);
     revealEditorSelection(Math.max(1, candidate.from + index + 1), Math.max(1, candidate.from + index + risk.suggestion.length + 1));
   }
@@ -1539,27 +1593,37 @@ export default function App() {
     setEditorText(nextText);
     setError(null);
     setEditorNotice(`已引用“${risk.item}”的修改建议。`);
+    const modification: Modification = {
+      item: risk.item,
+      risk_key: riskKey,
+      original: risk.original_text,
+      modified: risk.suggestion,
+      revision_id: revisionId,
+      anchor_text: risk.anchor_text ?? null,
+      insert_after_text: risk.insert_after_text ?? null,
+      paragraph_context: paragraphMeta.text,
+    };
     setModifications((previous) => [
       ...previous.filter((item) => !isRiskModification(item, risk, riskKey)),
-      {
-        item: risk.item,
-        risk_key: riskKey,
-        original: risk.original_text,
-        modified: risk.suggestion,
-        revision_id: revisionId,
-        anchor_text: risk.anchor_text ?? null,
-        insert_after_text: risk.insert_after_text ?? null,
-        paragraph_context: paragraphMeta.text,
-      }
+      modification
     ]);
+    saveModificationInBackground(modification);
     void submitFeedback(risk, riskKey, "edited", risk.suggestion);
 
     revealEditorSelection(Math.max(1, originalIndex + 1), Math.max(1, originalIndex + risk.suggestion.length + 1));
   }
 
-  function undoRiskModification(risk: ReviewRisk, riskKey: string) {
+  async function undoRiskModification(risk: ReviewRisk, riskKey: string) {
     const applied = modifications.find((item) => isRiskModification(item, risk, riskKey));
     if (!applied) return;
+    if (activeJob?.job_id && applied.modification_id) {
+      try {
+        await revertReviewModification(activeJob.job_id, applied.modification_id);
+      } catch (reason) {
+        setError(getErrorMessage(reason));
+        return;
+      }
+    }
     if (!editor || !applied.revision_id) {
       setError("无法自动撤销：未找到本项修订标识，请在左侧正文中手动恢复原文。");
       return;
@@ -1871,6 +1935,9 @@ export default function App() {
       setReview({ ...result, contract_text: result.contract_text ?? contractOverview.contract_text, manual_review_required: true });
       setContractOverview(null);
       setModifications(autoApplied.modifications);
+      for (const modification of autoApplied.modifications) {
+        saveModificationInBackground(modification, completedJob.job_id);
+      }
       setEditorText(autoApplied.correctedText);
       setReviewStage("modification");
       setEditorNotice(
@@ -1952,7 +2019,7 @@ export default function App() {
     setError(null);
 
     try {
-      const exportResult = await exportReviewedContract(file, exportModifications);
+      const exportResult = await exportReviewedContract(file, exportModifications, activeJob?.job_id);
       downloadBlob(exportResult.blob, "reviewed_contract.docx");
       setEditorNotice(
         exportResult.skipped > 0
@@ -2388,7 +2455,7 @@ export default function App() {
                                         : "引用修改"}
                               </button>
                               {accepted && appliedModification ? (
-                                <button className="secondary-button inline-button" type="button" onClick={() => undoRiskModification(risk, riskKey)}>
+                                <button className="secondary-button inline-button" type="button" onClick={() => void undoRiskModification(risk, riskKey)}>
                                   撤销本项
                                 </button>
                               ) : null}
@@ -2412,6 +2479,10 @@ export default function App() {
                               ) : null}
                             </div>
                           </div>
+
+                          {accepted && appliedModification?.actor_display_name ? (
+                            <p className="risk-title">修改人：{appliedModification.actor_display_name}</p>
+                          ) : null}
 
                           <div className={`original-block${isMissingClause(risk.original_text) ? " original-missing" : ""}`}>
                             <p className="risk-title">{isMissingClause(risk.original_text) ? "建议插入位置" : "定位原文"}</p>

@@ -129,6 +129,14 @@ def _modification_context(modification: Modification) -> str | None:
     return context
 
 
+def _modification_author(modification: Modification) -> str:
+    author = modification.get("author_display_name")
+    if not isinstance(author, str):
+        return "Legal AI"
+    normalized = author.strip()
+    return normalized[:120] or "Legal AI"
+
+
 MISSING_SENTINEL = "\u3010\u7f3a\u5931\u8be5\u7ea6\u5b9a\u3011"
 
 
@@ -173,10 +181,10 @@ def _make_run(text: str, deleted: bool = False) -> etree._Element:
     return run
 
 
-def _make_revision_container(tag: str, text: str, revision_id: int) -> etree._Element:
+def _make_revision_container(tag: str, text: str, revision_id: int, author: str = "Legal AI") -> etree._Element:
     container = etree.Element(tag)
     container.set(W_ID, str(revision_id))
-    container.set(W_AUTHOR, "Legal AI")
+    container.set(W_AUTHOR, author)
     container.set(W_DATE, _current_revision_date())
     container.append(_make_run(text, deleted=tag == W_DEL))
     return container
@@ -188,7 +196,9 @@ def _clear_paragraph_runs(paragraph: etree._Element) -> None:
             paragraph.remove(child)
 
 
-def _replace_with_revision(paragraph: etree._Element, original: str, modified: str, revision_id: int) -> bool:
+def _replace_with_revision(
+    paragraph: etree._Element, original: str, modified: str, revision_id: int, author: str
+) -> bool:
     paragraph_text = _paragraph_text(paragraph)
     exact_index = paragraph_text.find(original)
     if exact_index < 0:
@@ -200,19 +210,19 @@ def _replace_with_revision(paragraph: etree._Element, original: str, modified: s
 
     if prefix:
         paragraph.append(_make_run(prefix))
-    paragraph.append(_make_revision_container(W_DEL, original, revision_id))
-    paragraph.append(_make_revision_container(W_INS, modified, revision_id + 1))
+    paragraph.append(_make_revision_container(W_DEL, original, revision_id, author))
+    paragraph.append(_make_revision_container(W_INS, modified, revision_id + 1, author))
     if suffix:
         paragraph.append(_make_run(suffix))
     return True
 
 
-def _mark_inserted_paragraph(paragraph: etree._Element, modified: str, revision_id: int) -> None:
+def _mark_inserted_paragraph(paragraph: etree._Element, modified: str, revision_id: int, author: str) -> None:
     _clear_paragraph_runs(paragraph)
-    paragraph.append(_make_revision_container(W_INS, modified, revision_id))
+    paragraph.append(_make_revision_container(W_INS, modified, revision_id, author))
 
 
-def _mark_deleted_paragraph(paragraph: etree._Element, revision_id: int) -> bool:
+def _mark_deleted_paragraph(paragraph: etree._Element, revision_id: int, author: str) -> bool:
     """Mark one complete source paragraph as a real Word deletion.
 
     Word requires both a deleted paragraph mark in ``w:pPr/w:rPr`` and deleted
@@ -233,11 +243,11 @@ def _mark_deleted_paragraph(paragraph: etree._Element, revision_id: int) -> bool
         run_properties = etree.SubElement(paragraph_properties, W_RPR)
     paragraph_delete = etree.SubElement(run_properties, W_DEL)
     paragraph_delete.set(W_ID, str(revision_id))
-    paragraph_delete.set(W_AUTHOR, "Legal AI")
+    paragraph_delete.set(W_AUTHOR, author)
     paragraph_delete.set(W_DATE, _current_revision_date())
 
     _clear_paragraph_runs(paragraph)
-    paragraph.append(_make_revision_container(W_DEL, paragraph_text, revision_id + 1))
+    paragraph.append(_make_revision_container(W_DEL, paragraph_text, revision_id + 1, author))
     return True
 
 
@@ -286,11 +296,15 @@ def _disable_numbering(paragraph: etree._Element) -> None:
     numid.set(W_VAL, "0")
 
 
-def _replace_ooxml_paragraph(paragraph: etree._Element, original: str, modified: str, revision_id: int) -> bool:
-    return _replace_with_revision(paragraph, original, modified, revision_id)
+def _replace_ooxml_paragraph(
+    paragraph: etree._Element, original: str, modified: str, revision_id: int, author: str
+) -> bool:
+    return _replace_with_revision(paragraph, original, modified, revision_id, author)
 
 
-def _insert_after_ooxml_paragraph(root: etree._Element, anchor: str, modified: str, revision_id: int) -> bool:
+def _insert_after_ooxml_paragraph(
+    root: etree._Element, anchor: str, modified: str, revision_id: int, author: str
+) -> bool:
     matches = [
         paragraph
         for paragraph in root.iter(W_P)
@@ -301,7 +315,7 @@ def _insert_after_ooxml_paragraph(root: etree._Element, anchor: str, modified: s
 
     paragraph = matches[0]
     clone = deepcopy(paragraph)
-    _mark_inserted_paragraph(clone, modified, revision_id)
+    _mark_inserted_paragraph(clone, modified, revision_id, author)
     _disable_numbering(clone)
     parent = paragraph.getparent()
     if parent is None:
@@ -309,7 +323,7 @@ def _insert_after_ooxml_paragraph(root: etree._Element, anchor: str, modified: s
     parent.insert(parent.index(paragraph) + 1, clone)
     return True
 
-def _append_ooxml_paragraph(root: etree._Element, modified: str, revision_id: int) -> bool:
+def _append_ooxml_paragraph(root: etree._Element, modified: str, revision_id: int, author: str) -> bool:
     body = root.find(f".//{{{W_NS}}}body")
     if body is None:
         return False
@@ -317,11 +331,11 @@ def _append_ooxml_paragraph(root: etree._Element, modified: str, revision_id: in
     paragraphs = list(body.iter(W_P))
     if paragraphs:
         clone = deepcopy(paragraphs[-1])
-        _mark_inserted_paragraph(clone, modified, revision_id)
+        _mark_inserted_paragraph(clone, modified, revision_id, author)
         _disable_numbering(clone)
     else:
         clone = etree.Element(W_P)
-        _mark_inserted_paragraph(clone, modified, revision_id)
+        _mark_inserted_paragraph(clone, modified, revision_id, author)
 
     sect_pr = body.find(f"{{{W_NS}}}sectPr")
     if sect_pr is None:
@@ -425,7 +439,7 @@ def _accept_existing_revisions(root: etree._Element) -> None:
 
 def _replace_many_with_revisions(
     paragraph: etree._Element,
-    replacements: list[tuple[int, int, str, str, int]],
+    replacements: list[tuple[int, int, str, str, int, str]],
 ) -> int:
     """Write several non-overlapping tracked replacements into one paragraph.
 
@@ -437,12 +451,12 @@ def _replace_many_with_revisions(
     paragraph_text = _paragraph_text(paragraph)
     _clear_paragraph_runs(paragraph)
     cursor = 0
-    for start, end, original, modified, revision_id in replacements:
+    for start, end, original, modified, revision_id, author in replacements:
         if start > cursor:
             paragraph.append(_make_run(paragraph_text[cursor:start]))
-        paragraph.append(_make_revision_container(W_DEL, original, revision_id))
+        paragraph.append(_make_revision_container(W_DEL, original, revision_id, author))
         if modified:
-            paragraph.append(_make_revision_container(W_INS, modified, revision_id + 1))
+            paragraph.append(_make_revision_container(W_INS, modified, revision_id + 1, author))
         cursor = end
     if cursor < len(paragraph_text):
         paragraph.append(_make_run(paragraph_text[cursor:]))
@@ -451,7 +465,7 @@ def _replace_many_with_revisions(
 
 def _modify_xml_story(
     xml_bytes: bytes,
-    modifications: list[tuple[str, str, str | None, str | None]],
+    modifications: list[tuple[str, str, str | None, str | None, str]],
     starting_revision_id: int,
     track_revisions: bool = True,
 ) -> tuple[bytes, int, int]:
@@ -465,26 +479,26 @@ def _modify_xml_story(
     if track_revisions:
         # Insertions do not rewrite existing text.  Apply them first so a later
         # replacement cannot make an otherwise valid anchor disappear.
-        remaining_replacements: list[tuple[str, str, str | None, str | None]] = []
-        paragraph_deletions: list[tuple[str, str, str | None, str | None]] = []
-        for original, modified, anchor, paragraph_context in modifications:
+        remaining_replacements: list[tuple[str, str, str | None, str | None, str]] = []
+        paragraph_deletions: list[tuple[str, str, str | None, str | None, str]] = []
+        for original, modified, anchor, paragraph_context, author in modifications:
             if not _is_missing_sentinel(original):
                 if modified:
-                    remaining_replacements.append((original, modified, anchor, paragraph_context))
+                    remaining_replacements.append((original, modified, anchor, paragraph_context, author))
                 else:
-                    paragraph_deletions.append((original, modified, anchor, paragraph_context))
+                    paragraph_deletions.append((original, modified, anchor, paragraph_context, author))
                 continue
-            inserted = _insert_after_ooxml_paragraph(root, anchor, modified, revision_id) if anchor else False
+            inserted = _insert_after_ooxml_paragraph(root, anchor, modified, revision_id, author) if anchor else False
             if not inserted and not anchor:
-                inserted = _append_ooxml_paragraph(root, modified, revision_id)
+                inserted = _append_ooxml_paragraph(root, modified, revision_id, author)
             applied += int(inserted)
             if inserted:
                 revision_id += 1
 
-        inline_deletions: list[tuple[str, str, str | None, str | None]] = []
-        for original, modified, anchor, paragraph_context in paragraph_deletions:
+        inline_deletions: list[tuple[str, str, str | None, str | None, str]] = []
+        for original, modified, anchor, paragraph_context, author in paragraph_deletions:
             if paragraph_context and original != paragraph_context:
-                inline_deletions.append((original, modified, anchor, paragraph_context))
+                inline_deletions.append((original, modified, anchor, paragraph_context, author))
                 continue
             matches = [
                 paragraph
@@ -492,7 +506,7 @@ def _modify_xml_story(
                 if _paragraph_text(paragraph) == original
                 and (not paragraph_context or _paragraph_text(paragraph) == paragraph_context)
             ]
-            if len(matches) == 1 and _mark_deleted_paragraph(matches[0], revision_id):
+            if len(matches) == 1 and _mark_deleted_paragraph(matches[0], revision_id, author):
                 applied += 1
                 revision_id += 2
 
@@ -513,24 +527,24 @@ def _modify_xml_story(
             if not unmatched:
                 break
             paragraph_text = _paragraph_text(paragraph)
-            candidates: list[tuple[int, int, int, str, str]] = []
-            for modification_index, (original, modified, _anchor, paragraph_context) in unmatched:
+            candidates: list[tuple[int, int, int, str, str, str]] = []
+            for modification_index, (original, modified, _anchor, paragraph_context, author) in unmatched:
                 if paragraph_context and paragraph_text != paragraph_context:
                     continue
                 start = paragraph_text.find(original)
                 if start >= 0:
-                    candidates.append((start, start + len(original), modification_index, original, modified))
+                    candidates.append((start, start + len(original), modification_index, original, modified, author))
             if not candidates:
                 continue
 
-            selected: list[tuple[int, int, str, str, int]] = []
+            selected: list[tuple[int, int, str, str, int, str]] = []
             selected_indexes: set[int] = set()
             occupied_until = 0
             next_revision_id = revision_id
-            for start, end, modification_index, original, modified in sorted(candidates, key=lambda item: (item[0], item[1])):
+            for start, end, modification_index, original, modified, author in sorted(candidates, key=lambda item: (item[0], item[1])):
                 if start < occupied_until:
                     continue
-                selected.append((start, end, original, modified, next_revision_id))
+                selected.append((start, end, original, modified, next_revision_id, author))
                 selected_indexes.add(modification_index)
                 occupied_until = end
                 next_revision_id += 2 if modified else 1
@@ -542,18 +556,18 @@ def _modify_xml_story(
 
         return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True), applied, revision_id
 
-    for original, modified, anchor, paragraph_context in modifications:
+    for original, modified, anchor, paragraph_context, author in modifications:
         if _is_missing_sentinel(original):
             inserted = False
             if anchor:
                 inserted = (
-                    _insert_after_ooxml_paragraph(root, anchor, modified, revision_id)
+                    _insert_after_ooxml_paragraph(root, anchor, modified, revision_id, author)
                     if track_revisions
                     else _insert_final_paragraph_after(root, anchor, modified)
                 )
             if not inserted and track_revisions:
                 inserted = (
-                    _append_ooxml_paragraph(root, modified, revision_id)
+                    _append_ooxml_paragraph(root, modified, revision_id, author)
                 )
             applied += int(inserted)
             if inserted:
@@ -589,7 +603,7 @@ def _modify_xml_story(
         if len(matches) == 1:
             paragraph = matches[0]
             if track_revisions:
-                matched = _replace_ooxml_paragraph(paragraph, original, modified, revision_id)
+                matched = _replace_ooxml_paragraph(paragraph, original, modified, revision_id, author)
             else:
                 matched = _replace_with_final_text(paragraph, original, modified)
         applied += int(matched)
@@ -606,7 +620,8 @@ def modify_docx_inplace(
 ) -> DocxExportResult:
     validate_docx_file_bytes(file_bytes)
     normalized_modifications = [
-        (*_modification_texts(item), _modification_anchor(item), _modification_context(item)) for item in modifications
+        (*_modification_texts(item), _modification_anchor(item), _modification_context(item), _modification_author(item))
+        for item in modifications
     ]
 
     output = BytesIO()

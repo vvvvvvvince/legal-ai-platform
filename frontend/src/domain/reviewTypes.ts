@@ -170,6 +170,9 @@ export type ReviewResponse = {
 };
 
 export type Modification = {
+  modification_id?: string;
+  actor_user_id?: string;
+  actor_display_name?: string;
   item?: string;
   risk_key?: string;
   original: string;

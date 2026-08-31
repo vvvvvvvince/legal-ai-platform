@@ -13,6 +13,28 @@ export type ReviewJob = {
   error?: string | null;
 };
 
+export type ReviewModificationPayload = {
+  item?: string;
+  risk_key?: string;
+  original: string;
+  modified: string;
+  revision_id?: string;
+  anchor_text?: string | null;
+  insert_after_text?: string | null;
+  paragraph_context?: string | null;
+};
+
+export type ReviewModification = {
+  modification_id: string;
+  job_id: string;
+  status: "active" | "superseded" | "reverted";
+  modification: ReviewModificationPayload;
+  actor_user_id: string;
+  actor_display_name: string;
+  created_at: string;
+  updated_at: string;
+};
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object";
 }
@@ -36,6 +58,38 @@ export function normalizeReviewJob(payload: unknown): ReviewJob {
     attempt_count: typeof payload.attempt_count === "number" ? payload.attempt_count : 0,
     result: payload.result,
     error: typeof payload.error === "string" ? payload.error : null,
+  };
+}
+
+export function normalizeReviewModification(payload: unknown): ReviewModification {
+  if (!isRecord(payload) || typeof payload.modification_id !== "string" || typeof payload.job_id !== "string") {
+    throw new Error("修改记录返回了无法识别的数据。");
+  }
+  const status = payload.status;
+  const modification = payload.modification;
+  if ((status !== "active" && status !== "superseded" && status !== "reverted") || !isRecord(modification)
+    || typeof modification.original !== "string" || typeof modification.modified !== "string"
+    || typeof payload.actor_user_id !== "string" || typeof payload.actor_display_name !== "string") {
+    throw new Error("修改记录返回了无效状态。");
+  }
+  return {
+    modification_id: payload.modification_id,
+    job_id: payload.job_id,
+    status,
+    modification: {
+      ...(typeof modification.item === "string" ? { item: modification.item } : {}),
+      ...(typeof modification.risk_key === "string" ? { risk_key: modification.risk_key } : {}),
+      original: modification.original,
+      modified: modification.modified,
+      ...(typeof modification.revision_id === "string" ? { revision_id: modification.revision_id } : {}),
+      ...(typeof modification.anchor_text === "string" ? { anchor_text: modification.anchor_text } : {}),
+      ...(typeof modification.insert_after_text === "string" ? { insert_after_text: modification.insert_after_text } : {}),
+      ...(typeof modification.paragraph_context === "string" ? { paragraph_context: modification.paragraph_context } : {}),
+    },
+    actor_user_id: payload.actor_user_id,
+    actor_display_name: payload.actor_display_name,
+    created_at: typeof payload.created_at === "string" ? payload.created_at : "",
+    updated_at: typeof payload.updated_at === "string" ? payload.updated_at : "",
   };
 }
 
@@ -101,4 +155,40 @@ export async function getReviewJob(jobId: string): Promise<ReviewJob> {
     throw new Error(payload?.detail ?? `审查任务查询失败（${response.status}）。`);
   }
   return normalizeReviewJob(await response.json());
+}
+
+async function readReviewModification(response: Response, fallback: string): Promise<ReviewModification> {
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null) as { detail?: string } | null;
+    throw new Error(payload?.detail ?? fallback);
+  }
+  return normalizeReviewModification(await response.json());
+}
+
+export async function saveReviewModification(jobId: string, modification: ReviewModificationPayload): Promise<ReviewModification> {
+  const response = await fetch(`/api/review-jobs/${encodeURIComponent(jobId)}/modifications`, {
+    method: "POST",
+    headers: { ...apiHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify(modification),
+  });
+  return readReviewModification(response, "保存修改记录失败。");
+}
+
+export async function listReviewModifications(jobId: string): Promise<ReviewModification[]> {
+  const response = await fetch(`/api/review-jobs/${encodeURIComponent(jobId)}/modifications`, { headers: apiHeaders() });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null) as { detail?: string } | null;
+    throw new Error(payload?.detail ?? "读取修改记录失败。");
+  }
+  const payload = await response.json();
+  if (!Array.isArray(payload)) throw new Error("修改记录返回了无法识别的数据。");
+  return payload.map(normalizeReviewModification);
+}
+
+export async function revertReviewModification(jobId: string, modificationId: string): Promise<ReviewModification> {
+  const response = await fetch(
+    `/api/review-jobs/${encodeURIComponent(jobId)}/modifications/${encodeURIComponent(modificationId)}/revert`,
+    { method: "POST", headers: apiHeaders() },
+  );
+  return readReviewModification(response, "撤销修改记录失败。");
 }

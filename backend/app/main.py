@@ -488,10 +488,11 @@ async def revert_review_job_modification(
     reverted = _review_job_store().revert_modification(
         modification_id,
         identity.workspace_id,
+        job_id=job_id,
         actor_user_id=identity.user_id,
         actor_display_name=identity.display_name,
     )
-    if reverted is None or reverted.job_id != job_id:
+    if reverted is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Review modification not found.")
     return _modification_summary(reverted)
 
@@ -670,10 +671,11 @@ async def export_reviewed_contract(
     file: UploadFile = File(...),
     modifications: str = Form(...),
     export_mode: str = Form(default="tracked"),
+    review_job_id: str | None = Form(default=None),
     x_api_token: str | None = Header(default=None),
     x_tenant_id: str | None = Header(default=None),
 ) -> StreamingResponse:
-    require_request_identity(x_api_token, x_tenant_id)
+    identity = require_request_identity(x_api_token, x_tenant_id)
     if not file.filename or not file.filename.lower().endswith(".docx"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -695,6 +697,21 @@ async def export_reviewed_contract(
 
     try:
         parsed_modifications = parse_modifications(modifications)
+        saved_authors: dict[str, str] = {}
+        if review_job_id:
+            if _review_job_store().get_job(review_job_id, identity.workspace_id) is None:
+                raise ValueError("review_job_id does not belong to this workspace")
+            saved_authors = {
+                modification.modification_id: modification.actor_display_name
+                for modification in _review_job_store().list_modifications(review_job_id, identity.workspace_id)
+            }
+        for modification in parsed_modifications:
+            modification_id = modification.get("modification_id")
+            modification["author_display_name"] = (
+                saved_authors.get(modification_id)
+                if isinstance(modification_id, str)
+                else None
+            ) or identity.display_name
         if export_mode not in {"tracked", "final"}:
             raise ValueError("export_mode must be 'tracked' or 'final'.")
         export_result = await run_in_threadpool(
