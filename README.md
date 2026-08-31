@@ -69,12 +69,25 @@ docker compose up --build
 Open `http://localhost:8080`. The frontend container serves the built React app
 with Nginx and proxies API traffic to the backend container.
 
+The internal deployment uses two shared-workspace accounts. After the first
+backend start, provision them interactively from the backend container:
+
+```powershell
+docker compose exec backend python scripts/bootstrap_users.py
+```
+
+The browser authenticates with an HttpOnly session cookie. Do not configure
+`VITE_API_AUTH_TOKEN` or `VITE_TENANT_ID`; identity is derived by the backend
+and both users intentionally share the `shared` workspace.
+
 Deep review runs as a persistent background job. The UI submits to
 `POST /api/review-jobs`, polls `GET /api/review-jobs/{job_id}`, and resumes an
 unfinished job after a page refresh. Compose stores the SQLite job database in
 the named `backend_data` volume mounted at `/app/data`. The in-process worker
 uses one slot by default; set `REVIEW_JOB_RETENTION_DAYS` and
 `REVIEW_JOB_WORKER_CONCURRENCY` in `backend/.env` to adjust local behavior.
+Jobs use renewable SQLite leases, idempotency keys, and a cancellation endpoint
+so a second worker cannot publish a result for an active lease.
 
 When developing the frontend locally, keep `http://localhost:5173` reserved for
 Vite:

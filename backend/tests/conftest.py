@@ -18,4 +18,5 @@ def pytest_configure(config) -> None:
 
     runtime_root = Path(config.rootpath) / ".pytest-runtime"
     runtime_root.mkdir(parents=True, exist_ok=True)
-    config.option.basetemp = runtime_root / f"run-{os.getpid()}"
+    if not config.option.basetemp:
+        config.option.basetemp = runtime_root / f"run-{os.getpid()}"
