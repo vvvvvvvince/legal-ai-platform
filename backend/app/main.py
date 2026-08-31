@@ -158,6 +158,7 @@ def _job_summary(job: ReviewJob) -> dict[str, object]:
 @app.on_event("startup")
 def start_review_job_worker() -> None:
     auth = AuthStore(auth_db_path())
+    auth.cleanup_sessions()
     if os.getenv("APP_ENV", "development").lower() in {"production", "prod"} and not auth.has_active_users():
         raise RuntimeError("No active users configured; run scripts/bootstrap_users.py before production startup.")
     store = _review_job_store()
@@ -170,6 +171,8 @@ def start_review_job_worker() -> None:
             _execute_deep_review_job,
             poll_seconds=float(os.getenv("REVIEW_JOB_POLL_SECONDS", "1")),
             concurrency=max(1, int(os.getenv("REVIEW_JOB_WORKER_CONCURRENCY", "2"))),
+            lease_seconds=float(os.getenv("REVIEW_JOB_LEASE_SECONDS", "120")),
+            heartbeat_interval=float(os.getenv("REVIEW_JOB_HEARTBEAT_SECONDS", "30")),
         )
         worker.start()
         app.state.review_job_worker = worker
@@ -193,11 +196,23 @@ def _identity_payload(identity: RequestIdentity) -> dict[str, str]:
 
 
 @app.post("/api/auth/login")
-def login(request: LoginRequest, response: Response) -> dict[str, str]:
+def login(payload: LoginRequest, request: Request, response: Response) -> dict[str, str]:
     store = AuthStore(auth_db_path())
-    identity = store.authenticate(request.username, request.password)
+    client_key = request.client.host if request.client else "unknown"
+    max_attempts = max(1, int(os.getenv("LOGIN_MAX_ATTEMPTS", "5")))
+    window_seconds = max(60, int(os.getenv("LOGIN_WINDOW_SECONDS", "300")))
+    if not store.login_allowed(
+        payload.username,
+        client_key,
+        max_attempts=max_attempts,
+        window_seconds=window_seconds,
+    ):
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="登录尝试过多，请稍后再试。")
+    identity = store.authenticate(payload.username, payload.password)
     if identity is None:
+        store.record_login_failure(payload.username, client_key, window_seconds=window_seconds)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户名或密码错误。")
+    store.clear_login_failures(payload.username, client_key)
     lifetime = max(300, int(os.getenv("SESSION_LIFETIME_SECONDS", str(8 * 3600))))
     token = store.create_session(identity.user_id, lifetime)
     response.set_cookie(

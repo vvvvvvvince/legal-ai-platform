@@ -85,6 +85,14 @@ class AuthStore:
                     revoked_at TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token_hash);
+                CREATE TABLE IF NOT EXISTS login_attempts (
+                    attempt_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT NOT NULL,
+                    client_key TEXT NOT NULL,
+                    attempted_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_login_attempts_lookup
+                    ON login_attempts(username, client_key, attempted_at);
                 """
             )
 
@@ -189,9 +197,10 @@ class AuthStore:
             ).fetchone()
             if row is None:
                 return None
+            touch_before = (now - timedelta(minutes=5)).isoformat()
             connection.execute(
-                "UPDATE sessions SET last_seen_at = ? WHERE token_hash = ?",
-                (now.isoformat(), token_hash),
+                "UPDATE sessions SET last_seen_at = ? WHERE token_hash = ? AND last_seen_at < ?",
+                (now.isoformat(), token_hash, touch_before),
             )
         return self._identity(row)
 
@@ -204,3 +213,51 @@ class AuthStore:
                 "UPDATE sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL",
                 (_now().isoformat(), token_hash),
             )
+
+    def record_login_failure(
+        self,
+        username: str,
+        client_key: str,
+        *,
+        window_seconds: int = 300,
+    ) -> None:
+        now = _now()
+        cutoff = (now - timedelta(seconds=window_seconds)).isoformat()
+        with self._connect() as connection:
+            connection.execute("DELETE FROM login_attempts WHERE attempted_at < ?", (cutoff,))
+            connection.execute(
+                "INSERT INTO login_attempts(username, client_key, attempted_at) VALUES (?, ?, ?)",
+                (username.strip().lower(), client_key, now.isoformat()),
+            )
+
+    def login_allowed(
+        self,
+        username: str,
+        client_key: str,
+        *,
+        max_attempts: int = 5,
+        window_seconds: int = 300,
+    ) -> bool:
+        cutoff = (_now() - timedelta(seconds=window_seconds)).isoformat()
+        with self._connect() as connection:
+            row = connection.execute(
+                """SELECT COUNT(*) AS total FROM login_attempts
+                   WHERE username = ? AND client_key = ? AND attempted_at >= ?""",
+                (username.strip().lower(), client_key, cutoff),
+            ).fetchone()
+        return int(row["total"]) < max_attempts
+
+    def clear_login_failures(self, username: str, client_key: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM login_attempts WHERE username = ? AND client_key = ?",
+                (username.strip().lower(), client_key),
+            )
+
+    def cleanup_sessions(self) -> int:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM sessions WHERE expires_at <= ? OR revoked_at IS NOT NULL",
+                (_now().isoformat(),),
+            )
+        return cursor.rowcount

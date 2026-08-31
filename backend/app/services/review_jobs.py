@@ -69,13 +69,13 @@ class ReviewJobStore:
 
     def _initialize(self) -> None:
         with self._connect() as connection:
-            connection.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS review_jobs (
+            def create_table(name: str) -> None:
+                connection.execute(
+                    f"""CREATE TABLE IF NOT EXISTS {name} (
                     job_id TEXT PRIMARY KEY,
                     tenant_id TEXT NOT NULL,
                     job_type TEXT NOT NULL,
-                    status TEXT NOT NULL CHECK(status IN ('queued', 'running', 'succeeded', 'failed')),
+                    status TEXT NOT NULL CHECK(status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')),
                     request_json TEXT NOT NULL,
                     result_json TEXT,
                     error_message TEXT,
@@ -92,16 +92,39 @@ class ReviewJobStore:
                     ,lease_expires_at TEXT
                     ,heartbeat_at TEXT
                     ,cancel_requested_at TEXT
-                );
-                CREATE INDEX IF NOT EXISTS idx_review_jobs_queue
-                    ON review_jobs(status, created_at);
-                CREATE INDEX IF NOT EXISTS idx_review_jobs_tenant
-                    ON review_jobs(tenant_id, created_at);
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_review_jobs_idempotency
-                    ON review_jobs(tenant_id, idempotency_key)
-                    WHERE idempotency_key IS NOT NULL;
-                """
-            )
+                )"""
+                )
+
+            create_table("review_jobs")
+            table_sql_row = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'review_jobs'"
+            ).fetchone()
+            table_sql = str(table_sql_row["sql"] or "")
+            if "'cancelled'" not in table_sql:
+                legacy_columns = [row["name"] for row in connection.execute("PRAGMA table_info(review_jobs)")]
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute("ALTER TABLE review_jobs RENAME TO review_jobs_legacy")
+                for index_name in ("idx_review_jobs_queue", "idx_review_jobs_tenant", "idx_review_jobs_idempotency"):
+                    connection.execute(f"DROP INDEX IF EXISTS {index_name}")
+                create_table("review_jobs")
+                target_columns = [row["name"] for row in connection.execute("PRAGMA table_info(review_jobs)")]
+                defaults = {
+                    "workspace_id": "tenant_id",
+                    "created_by_user_id": "'system-legacy'",
+                    "created_by_display_name": "'Legacy'",
+                    "attempt_count": "0",
+                }
+                select_values = [
+                    column if column in legacy_columns else defaults.get(column, "NULL")
+                    for column in target_columns
+                ]
+                connection.execute(
+                    f"INSERT INTO review_jobs ({', '.join(target_columns)}) "
+                    f"SELECT {', '.join(select_values)} FROM review_jobs_legacy"
+                )
+                connection.execute("DROP TABLE review_jobs_legacy")
+                connection.commit()
+
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(review_jobs)")}
             additions = {
                 "workspace_id": "TEXT NOT NULL DEFAULT 'shared'",
@@ -116,6 +139,17 @@ class ReviewJobStore:
             for name, definition in additions.items():
                 if name not in columns:
                     connection.execute(f"ALTER TABLE review_jobs ADD COLUMN {name} {definition}")
+            connection.executescript(
+                """
+                CREATE INDEX IF NOT EXISTS idx_review_jobs_queue
+                    ON review_jobs(status, created_at);
+                CREATE INDEX IF NOT EXISTS idx_review_jobs_tenant
+                    ON review_jobs(tenant_id, created_at);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_review_jobs_idempotency
+                    ON review_jobs(tenant_id, idempotency_key)
+                    WHERE idempotency_key IS NOT NULL;
+                """
+            )
 
     @staticmethod
     def _from_row(row: sqlite3.Row | None) -> ReviewJob | None:
@@ -156,15 +190,25 @@ class ReviewJobStore:
     ) -> ReviewJob:
         now = _utc_now()
         job_id = str(uuid4())
+        request_json = json.dumps(request, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             if idempotency_key:
                 existing = connection.execute(
                     "SELECT * FROM review_jobs WHERE tenant_id = ? AND idempotency_key = ?",
                     (tenant_id, idempotency_key),
                 ).fetchone()
                 if existing is not None:
-                    if existing["request_json"] != json.dumps(request, ensure_ascii=False):
+                    existing_request = json.dumps(
+                        json.loads(existing["request_json"]),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    if existing_request != request_json:
+                        connection.rollback()
                         raise IdempotencyConflict("Idempotency key was already used with a different request.")
+                    connection.commit()
                     return self._from_row(existing)  # type: ignore[return-value]
             connection.execute(
                 """
@@ -174,12 +218,13 @@ class ReviewJobStore:
                     created_by_display_name, idempotency_key
                 ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (job_id, tenant_id, job_type, json.dumps(request, ensure_ascii=False), now, now,
+                (job_id, tenant_id, job_type, request_json, now, now,
                  tenant_id, created_by_user_id, created_by_display_name, idempotency_key),
             )
             row = connection.execute(
                 "SELECT * FROM review_jobs WHERE job_id = ?", (job_id,)
             ).fetchone()
+            connection.commit()
         return self._from_row(row)  # type: ignore[return-value]
 
     def get_job(self, job_id: str, tenant_id: str) -> ReviewJob | None:
@@ -190,10 +235,10 @@ class ReviewJobStore:
             ).fetchone()
         return self._from_row(row)
 
-    def claim_next_job(self, worker_id: str = "worker", lease_seconds: int = 120) -> ReviewJob | None:
+    def claim_next_job(self, worker_id: str = "worker", lease_seconds: float = 120) -> ReviewJob | None:
         now_dt = datetime.now(timezone.utc)
         now = now_dt.isoformat()
-        lease_expires = (now_dt + timedelta(seconds=max(10, lease_seconds))).isoformat()
+        lease_expires = (now_dt + timedelta(seconds=max(0.1, lease_seconds))).isoformat()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -224,13 +269,13 @@ class ReviewJobStore:
             connection.commit()
         return self._from_row(claimed)
 
-    def heartbeat(self, job_id: str, worker_id: str, lease_seconds: int = 120) -> bool:
+    def heartbeat(self, job_id: str, worker_id: str, lease_seconds: float = 120) -> bool:
         now_dt = datetime.now(timezone.utc)
         with self._connect() as connection:
             cursor = connection.execute(
                 """UPDATE review_jobs SET lease_expires_at = ?, heartbeat_at = ?, updated_at = ?
                    WHERE job_id = ? AND status = 'running' AND lease_owner = ?""",
-                ((now_dt + timedelta(seconds=max(10, lease_seconds))).isoformat(), now_dt.isoformat(), now_dt.isoformat(), job_id, worker_id),
+                ((now_dt + timedelta(seconds=max(0.1, lease_seconds))).isoformat(), now_dt.isoformat(), now_dt.isoformat(), job_id, worker_id),
             )
         return cursor.rowcount == 1
 
@@ -239,6 +284,9 @@ class ReviewJobStore:
 
     def fail_job(self, job_id: str, error_message: str, worker_id: str = "worker") -> None:
         self._finish_job(job_id, "failed", error_message=error_message, worker_id=worker_id)
+
+    def cancel_running_job(self, job_id: str, worker_id: str) -> None:
+        self._finish_job(job_id, "cancelled", error_message="任务已取消。", worker_id=worker_id)
 
     def _finish_job(
         self,
@@ -249,7 +297,7 @@ class ReviewJobStore:
         error_message: str | None = None,
         worker_id: str = "worker",
     ) -> None:
-        if status not in {"succeeded", "failed"}:
+        if status not in {"succeeded", "failed", "cancelled"}:
             raise ValueError(f"Unsupported terminal status: {status}")
         now = _utc_now()
         with self._connect() as connection:
@@ -290,7 +338,7 @@ class ReviewJobStore:
         with self._connect() as connection:
             connection.execute(
                 """UPDATE review_jobs SET cancel_requested_at = ?, updated_at = ?,
-                   status = CASE WHEN status = 'queued' THEN 'failed' ELSE status END,
+                   status = CASE WHEN status = 'queued' THEN 'cancelled' ELSE status END,
                    error_message = CASE WHEN status = 'queued' THEN '任务已取消。' ELSE error_message END,
                    finished_at = CASE WHEN status = 'queued' THEN ? ELSE finished_at END
                    WHERE job_id = ? AND tenant_id = ? AND status IN ('queued', 'running')""",
@@ -315,7 +363,7 @@ class ReviewJobStore:
             cursor = connection.execute(
                 """
                 DELETE FROM review_jobs
-                WHERE status IN ('succeeded', 'failed') AND finished_at < ?
+                WHERE status IN ('succeeded', 'failed', 'cancelled') AND finished_at < ?
                 """,
                 (cutoff,),
             )
@@ -326,11 +374,23 @@ class ReviewJobStore:
 class ReviewJobWorker:
     """Small in-process worker used by the local deployment."""
 
-    def __init__(self, store: ReviewJobStore, review_fn, poll_seconds: float = 1.0, concurrency: int = 1) -> None:
+    def __init__(
+        self,
+        store: ReviewJobStore,
+        review_fn,
+        poll_seconds: float = 1.0,
+        concurrency: int = 1,
+        lease_seconds: float = 120,
+        heartbeat_interval: float = 30,
+    ) -> None:
         self.store = store
         self.review_fn = review_fn
         self.poll_seconds = max(0.1, poll_seconds)
         self.concurrency = max(1, concurrency)
+        self.lease_seconds = max(0.1, lease_seconds)
+        self.heartbeat_interval = max(0.05, heartbeat_interval)
+        if self.heartbeat_interval >= self.lease_seconds:
+            raise ValueError("heartbeat_interval must be shorter than lease_seconds")
         self._stop_event = threading.Event()
         self._threads: list[threading.Thread] = []
 
@@ -350,16 +410,33 @@ class ReviewJobWorker:
 
     def run_once(self) -> bool:
         worker_id = threading.current_thread().name
-        job = self.store.claim_next_job(worker_id=worker_id)
+        job = self.store.claim_next_job(worker_id=worker_id, lease_seconds=self.lease_seconds)
         if job is None:
             return False
+        heartbeat_stop = threading.Event()
+
+        def renew_lease() -> None:
+            while not heartbeat_stop.wait(self.heartbeat_interval):
+                if not self.store.heartbeat(job.job_id, worker_id, self.lease_seconds):
+                    return
+
+        heartbeat_thread = threading.Thread(
+            target=renew_lease,
+            name=f"{worker_id}-heartbeat",
+            daemon=True,
+        )
+        heartbeat_thread.start()
         try:
             result = self.review_fn(job.request)
+            heartbeat_stop.set()
+            heartbeat_thread.join(timeout=self.heartbeat_interval + 0.1)
             if self.store.is_cancel_requested(job.job_id, worker_id):
-                self.store.fail_job(job.job_id, "任务已取消。", worker_id=worker_id)
+                self.store.cancel_running_job(job.job_id, worker_id=worker_id)
             else:
                 self.store.complete_job(job.job_id, result, worker_id=worker_id)
         except Exception:
+            heartbeat_stop.set()
+            heartbeat_thread.join(timeout=self.heartbeat_interval + 0.1)
             logger.exception("Review job %s failed", job.job_id)
             self.store.fail_job(
                 job.job_id,

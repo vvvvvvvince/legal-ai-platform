@@ -20,3 +20,9 @@ def pytest_configure(config) -> None:
     runtime_root.mkdir(parents=True, exist_ok=True)
     if not config.option.basetemp:
         config.option.basetemp = runtime_root / f"run-{os.getpid()}"
+
+
+def pytest_sessionstart(session) -> None:
+    """Undo pytest's Windows 0700 ACL before tmp_path fixtures enumerate it."""
+    base_temp = session.config._tmp_path_factory.getbasetemp()
+    os.chmod(base_temp, 0o777)

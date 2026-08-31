@@ -1,3 +1,7 @@
+from concurrent.futures import ThreadPoolExecutor
+import sqlite3
+import threading
+
 from app.services.review_jobs import IdempotencyConflict, ReviewJobStore
 
 
@@ -22,6 +26,15 @@ def test_store_transitions_and_recovers_running_jobs(tmp_path):
     claimed = store.claim_next_job()
     assert claimed.job_id == job.job_id
     assert claimed.status == "running"
+
+    assert store.recover_running_jobs() == 0
+    assert store.get_job(job.job_id, "local").status == "running"
+
+    with store._connect() as connection:
+        connection.execute(
+            "UPDATE review_jobs SET lease_expires_at = '2000-01-01T00:00:00+00:00' WHERE job_id = ?",
+            (job.job_id,),
+        )
 
     assert store.recover_running_jobs() == 1
     assert store.get_job(job.job_id, "local").status == "queued"
@@ -71,3 +84,63 @@ def test_expired_lease_can_be_reclaimed_by_another_worker(tmp_path):
     second = store.claim_next_job("worker-b", lease_seconds=10)
     assert second and second.lease_owner == "worker-b"
     assert store.heartbeat(job.job_id, "worker-a") is False
+
+
+def test_concurrent_idempotent_submissions_return_one_job(tmp_path):
+    store = ReviewJobStore(tmp_path / "jobs.sqlite3")
+    participants = 12
+    barrier = threading.Barrier(participants)
+
+    def submit_once(_index):
+        barrier.wait(timeout=2)
+        return store.create_job(
+            tenant_id="shared",
+            job_type="deep_review",
+            request={"value": 1},
+            idempotency_key="same-key",
+        ).job_id
+
+    with ThreadPoolExecutor(max_workers=participants) as executor:
+        job_ids = list(executor.map(submit_once, range(participants)))
+
+    assert len(set(job_ids)) == 1
+
+
+def test_queued_cancellation_uses_cancelled_terminal_state(tmp_path):
+    store = ReviewJobStore(tmp_path / "jobs.sqlite3")
+    job = store.create_job(tenant_id="shared", job_type="deep_review", request={})
+
+    cancelled = store.request_cancel(job.job_id, "shared")
+
+    assert cancelled.status == "cancelled"
+    assert cancelled.error == "任务已取消。"
+
+
+def test_old_status_constraint_is_migrated_without_losing_jobs(tmp_path):
+    path = tmp_path / "jobs.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """CREATE TABLE review_jobs (
+                job_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                job_type TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('queued', 'running', 'succeeded', 'failed')),
+                request_json TEXT NOT NULL,
+                result_json TEXT,
+                error_message TEXT,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                finished_at TEXT,
+                updated_at TEXT NOT NULL,
+                attempt_count INTEGER NOT NULL DEFAULT 0
+            )"""
+        )
+        connection.execute(
+            "INSERT INTO review_jobs(job_id, tenant_id, job_type, status, request_json, created_at, updated_at) VALUES ('legacy', 'shared', 'deep_review', 'queued', '{}', '2026-01-01', '2026-01-01')"
+        )
+
+    store = ReviewJobStore(path)
+    cancelled = store.request_cancel("legacy", "shared")
+
+    assert cancelled.status == "cancelled"
+    assert store.get_job("legacy", "shared") is not None

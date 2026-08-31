@@ -1,3 +1,6 @@
+import threading
+import time
+
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -64,3 +67,56 @@ def test_worker_persists_safe_failure(tmp_path):
     result = store.get_job(job.job_id, "local")
     assert result.status == "failed"
     assert result.error == "审查任务执行失败，请检查模型服务后重试。"
+
+
+def test_worker_renews_lease_while_review_is_running(tmp_path):
+    store = ReviewJobStore(tmp_path / "jobs.sqlite3")
+    job = store.create_job(tenant_id="shared", job_type="deep_review", request={})
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_review(_request):
+        started.set()
+        release.wait(timeout=2)
+        return {"ok": True}
+
+    worker = ReviewJobWorker(
+        store,
+        slow_review,
+        lease_seconds=0.2,
+        heartbeat_interval=0.05,
+    )
+    thread = threading.Thread(target=worker.run_once, name="worker-a")
+    thread.start()
+    assert started.wait(timeout=1)
+    time.sleep(0.35)
+
+    assert store.claim_next_job("worker-b", lease_seconds=0.2) is None
+
+    release.set()
+    thread.join(timeout=2)
+    assert store.get_job(job.job_id, "shared").status == "succeeded"
+
+
+def test_running_cancellation_discards_model_result(tmp_path):
+    store = ReviewJobStore(tmp_path / "jobs.sqlite3")
+    job = store.create_job(tenant_id="shared", job_type="deep_review", request={})
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_review(_request):
+        started.set()
+        release.wait(timeout=2)
+        return {"must_not_publish": True}
+
+    worker = ReviewJobWorker(store, slow_review, lease_seconds=1, heartbeat_interval=0.1)
+    thread = threading.Thread(target=worker.run_once, name="worker-cancel")
+    thread.start()
+    assert started.wait(timeout=1)
+    store.request_cancel(job.job_id, "shared")
+    release.set()
+    thread.join(timeout=2)
+
+    cancelled = store.get_job(job.job_id, "shared")
+    assert cancelled.status == "cancelled"
+    assert cancelled.result is None

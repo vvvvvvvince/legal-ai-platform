@@ -24,3 +24,17 @@ def test_business_route_rejects_missing_session_and_spoofed_tenant(monkeypatch, 
     with TestClient(app) as client:
         response = client.get("/api/system-status", headers={"X-Tenant-ID": "other"})
         assert response.status_code == 401
+
+
+def test_login_is_rate_limited_after_repeated_failures(monkeypatch, tmp_path):
+    db = tmp_path / "auth.sqlite3"
+    monkeypatch.setenv("AUTH_DB", str(db))
+    monkeypatch.setenv("LOGIN_MAX_ATTEMPTS", "3")
+    AuthStore(db).create_user("alice", "Alice", "correct-password")
+
+    with TestClient(app) as client:
+        for _ in range(3):
+            assert client.post("/api/auth/login", json={"username": "alice", "password": "wrong-password"}).status_code == 401
+        blocked = client.post("/api/auth/login", json={"username": "alice", "password": "correct-password"})
+
+    assert blocked.status_code == 429
