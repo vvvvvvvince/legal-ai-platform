@@ -44,14 +44,7 @@ const EMPTY_INTAKE_CRITERIA: IntakeReviewCriteria = {
   additional_notes: [],
 };
 export function apiHeaders() {
-  const headers: Record<string, string> = {
-    "X-Tenant-ID": import.meta.env.VITE_TENANT_ID || "local"
-  };
-  const apiToken = import.meta.env.VITE_API_AUTH_TOKEN;
-  if (apiToken) {
-    headers["X-API-Token"] = apiToken;
-  }
-  return headers;
+  return {};
 }
 
 export async function getContractOverview(file: File): Promise<ContractOverviewResponse> {

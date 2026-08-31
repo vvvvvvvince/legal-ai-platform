@@ -142,6 +142,13 @@ class AuthStore:
             return None
         return self._identity(row)
 
+    def has_active_users(self) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM users WHERE is_active = 1 LIMIT 1"
+            ).fetchone()
+        return row is not None
+
     def create_session(self, user_id: str, lifetime_seconds: int) -> str:
         if lifetime_seconds <= 0:
             raise ValueError("session lifetime must be positive")

@@ -12,6 +12,7 @@ import {
   MISSING_SENTINEL
 } from "./reviewUtils";
 import { useReviewWorkflow } from "./hooks/useReviewWorkflow";
+import { useAuth } from "./hooks/useAuth";
 import { apiHeaders, continueIntakeChat, continueLegalResearch, getContractOverview, isLegalResearchQuestion } from "./api/legalApi";
 import { normalizeReviewResponse } from "./domain/reviewTransforms";
 import { ReviewJobStatus } from "./features/review/ReviewJobStatus";
@@ -34,6 +35,29 @@ const emptyIntakeCriteria: IntakeReviewCriteria = {
   special_requirements: [],
   additional_notes: []
 };
+
+function LoginScreen({ onLogin, error }: { onLogin: (username: string, password: string) => Promise<void>; error: string | null }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    try { await onLogin(username, password); } finally { setBusy(false); }
+  }
+  return (
+    <main style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: "#f7f8fa" }}>
+      <form onSubmit={submit} style={{ width: "min(360px, calc(100vw - 40px))", padding: 28, borderRadius: 20, background: "white", boxShadow: "0 18px 50px rgba(15,23,42,.10)" }}>
+        <h1 style={{ marginTop: 0 }}>AI 法务助手</h1>
+        <p style={{ color: "#64748b" }}>登录共享合同工作区</p>
+        <input aria-label="用户名" value={username} onChange={(event) => setUsername(event.target.value)} placeholder="用户名" autoComplete="username" style={{ width: "100%", boxSizing: "border-box", padding: "11px 12px", marginBottom: 10, border: "1px solid #d9dee7", borderRadius: 10 }} />
+        <input aria-label="密码" type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="密码" autoComplete="current-password" style={{ width: "100%", boxSizing: "border-box", padding: "11px 12px", marginBottom: 14, border: "1px solid #d9dee7", borderRadius: 10 }} />
+        {error && <p role="alert" style={{ color: "#b42318", fontSize: 13 }}>{error}</p>}
+        <button type="submit" disabled={busy || !username || !password} style={{ width: "100%", padding: "11px 12px", border: 0, borderRadius: 10, background: "#1f2937", color: "white", cursor: "pointer" }}>{busy ? "登录中…" : "登录"}</button>
+      </form>
+    </main>
+  );
+}
 
 function criteriaToDeepReviewSettings(criteria: IntakeReviewCriteria, overview: ContractOverview): DeepReviewFormSettings {
   return {
@@ -788,7 +812,10 @@ function downloadBlob(blob: Blob, filename: string) {
 }
 
 export default function App() {
+  const auth = useAuth();
   const { activeJob, submitDeepReview } = useReviewWorkflow();
+  if (!auth.isReady) return <main style={{ minHeight: "100vh", display: "grid", placeItems: "center" }}>正在检查登录状态…</main>;
+  if (!auth.identity) return <LoginScreen onLogin={auth.signIn} error={auth.error} />;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const highlightedParagraphRef = useRef<HTMLElement | null>(null);
   const insertionParagraphRef = useRef<HTMLElement | null>(null);

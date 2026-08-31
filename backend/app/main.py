@@ -5,9 +5,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
-from fastapi import Body, FastAPI, File, Form, Header, HTTPException, UploadFile, status
+from fastapi import Body, FastAPI, File, Form, Header, HTTPException, Request, Response, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
 from app.schemas.review import (
@@ -36,7 +37,16 @@ from app.services.contract_overview import create_contract_overview
 from app.services.intake_chat import continue_intake_chat
 from app.services.legal_research_chat import continue_legal_research_chat
 from app.services.review_report import render_review_report
-from app.services.request_auth import require_request_identity
+from app.services.auth_store import AuthStore
+from app.services.request_auth import (
+    SESSION_COOKIE_NAME,
+    RequestIdentity,
+    auth_db_path,
+    identity_from_cookie,
+    require_request_identity,
+    reset_current_identity,
+    set_current_identity,
+)
 from app.services.review_jobs import ReviewJob, ReviewJobStore, ReviewJobWorker
 
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
@@ -56,6 +66,11 @@ PDF_QUALITY_NOTES = {
     "partial": "PDF 仅部分页面识别出文本，可能存在漏审，需要人工复核。",
     "scanned": "PDF 疑似扫描件，当前仅识别到少量文本，需要 OCR 后复核。",
 }
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
 
 app = FastAPI(
     title="Legal AI Platform API",
@@ -78,6 +93,21 @@ app.add_middleware(
         "X-Review-Skipped-Modifications",
     ],
 )
+
+
+@app.middleware("http")
+async def attach_request_identity(request: Request, call_next):
+    if request.url.path.startswith("/api/auth") or request.url.path == "/health":
+        return await call_next(request)
+    store = AuthStore(auth_db_path())
+    identity = identity_from_cookie(request.cookies.get(SESSION_COOKIE_NAME))
+    if store.has_active_users() and identity is None:
+        return JSONResponse({"detail": "请先登录。"}, status_code=status.HTTP_401_UNAUTHORIZED)
+    token = set_current_identity(identity)
+    try:
+        return await call_next(request)
+    finally:
+        reset_current_identity(token)
 
 
 def job_runtime_config() -> dict[str, object]:
@@ -146,7 +176,53 @@ def stop_review_job_worker() -> None:
     worker = getattr(app.state, "review_job_worker", None)
     if worker is not None:
         worker.stop()
-        app.state.review_job_worker = None
+    app.state.review_job_worker = None
+
+
+def _identity_payload(identity: RequestIdentity) -> dict[str, str]:
+    return {
+        "user_id": identity.user_id,
+        "username": identity.username,
+        "display_name": identity.display_name,
+        "workspace_id": identity.workspace_id,
+    }
+
+
+@app.post("/api/auth/login")
+def login(request: LoginRequest, response: Response) -> dict[str, str]:
+    store = AuthStore(auth_db_path())
+    identity = store.authenticate(request.username, request.password)
+    if identity is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户名或密码错误。")
+    lifetime = max(300, int(os.getenv("SESSION_LIFETIME_SECONDS", str(8 * 3600))))
+    token = store.create_session(identity.user_id, lifetime)
+    response.set_cookie(
+        SESSION_COOKIE_NAME,
+        token,
+        max_age=lifetime,
+        httponly=True,
+        samesite="lax",
+        secure=os.getenv("APP_ENV", "development").lower() in {"production", "prod"}
+        or os.getenv("SESSION_COOKIE_SECURE", "false").lower() in {"1", "true", "yes"},
+        path="/",
+    )
+    return _identity_payload(RequestIdentity.from_user(identity))
+
+
+@app.get("/api/auth/session")
+def current_session(request: Request) -> dict[str, str]:
+    identity = identity_from_cookie(request.cookies.get(SESSION_COOKIE_NAME))
+    if identity is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="请先登录。")
+    return _identity_payload(identity)
+
+
+@app.post("/api/auth/logout")
+def logout(request: Request, response: Response) -> dict[str, str]:
+    store = AuthStore(auth_db_path())
+    store.revoke_session(request.cookies.get(SESSION_COOKIE_NAME))
+    response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+    return {"status": "ok"}
 
 
 @app.get("/health")
@@ -287,9 +363,9 @@ async def create_review_job(
     x_api_token: str | None = Header(default=None),
     x_tenant_id: str | None = Header(default=None),
 ) -> dict[str, object]:
-    tenant_id = require_request_identity(x_api_token, x_tenant_id)
+    identity = require_request_identity(x_api_token, x_tenant_id)
     job = _review_job_store().create_job(
-        tenant_id=tenant_id,
+        tenant_id=identity.workspace_id,
         job_type="deep_review",
         request=request.model_dump(mode="json"),
     )
@@ -302,8 +378,8 @@ async def get_review_job(
     x_api_token: str | None = Header(default=None),
     x_tenant_id: str | None = Header(default=None),
 ) -> dict[str, object]:
-    tenant_id = require_request_identity(x_api_token, x_tenant_id)
-    job = _review_job_store().get_job(job_id, tenant_id)
+    identity = require_request_identity(x_api_token, x_tenant_id)
+    job = _review_job_store().get_job(job_id, identity.workspace_id)
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Review job not found.")
     return _job_summary(job)
@@ -559,13 +635,15 @@ async def record_review_feedback(
     x_api_token: str | None = Header(default=None),
     x_tenant_id: str | None = Header(default=None),
 ) -> dict[str, str]:
-    require_request_identity(x_api_token, x_tenant_id)
+    identity = require_request_identity(x_api_token, x_tenant_id)
     path = Path(os.getenv("REVIEW_FEEDBACK_LOG", "logs/review_feedback.jsonl"))
     if not path.is_absolute():
         path = Path(__file__).resolve().parents[2] / path
     record = {
         **feedback.model_dump(),
-        "tenant_id": x_tenant_id,
+        "tenant_id": identity.workspace_id,
+        "actor_user_id": identity.user_id,
+        "actor_display_name": identity.display_name,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
