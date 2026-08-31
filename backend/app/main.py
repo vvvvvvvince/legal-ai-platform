@@ -49,7 +49,8 @@ from app.services.request_auth import (
     reset_current_identity,
     set_current_identity,
 )
-from app.services.review_jobs import IdempotencyConflict, ReviewJob, ReviewJobStore, ReviewJobWorker, ReviewModification
+from app.services.review_job_files import has_source_docx, read_source_docx, save_source_docx
+from app.services.review_jobs import IdempotencyConflict, ModificationSaveResult, ReviewJob, ReviewJobStore, ReviewJobWorker, ReviewModification
 
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 API_VERSION = "2026.08.18-chat-intake"
@@ -171,7 +172,9 @@ def _execute_deep_review_job(request: dict[str, object]) -> dict[str, object]:
     return result.model_dump(mode="json")
 
 
-def _job_summary(job: ReviewJob) -> dict[str, object]:
+def _job_summary(job: ReviewJob, *, include_request: bool = False) -> dict[str, object]:
+    request = job.request if isinstance(job.request, dict) else {}
+    filename = request.get("filename") if isinstance(request.get("filename"), str) else None
     summary: dict[str, object] = {
         "job_id": job.job_id,
         "job_type": job.job_type,
@@ -181,7 +184,17 @@ def _job_summary(job: ReviewJob) -> dict[str, object]:
         "finished_at": job.finished_at,
         "updated_at": job.updated_at,
         "attempt_count": job.attempt_count,
+        "filename": filename,
+        "created_by_display_name": job.created_by_display_name,
+        "has_source_docx": has_source_docx(job.job_id),
     }
+    if include_request:
+        summary["request"] = {
+            "filename": filename,
+            "contract_text": request.get("contract_text"),
+            "settings": request.get("settings"),
+            "document_quality": request.get("document_quality"),
+        }
     if job.status == "succeeded":
         summary["result"] = job.result
     if job.status in {"failed", "cancelled"}:
@@ -189,8 +202,11 @@ def _job_summary(job: ReviewJob) -> dict[str, object]:
     return summary
 
 
-def _modification_summary(modification: ReviewModification) -> dict[str, object]:
-    return {
+def _modification_summary(
+    modification: ReviewModification,
+    superseded: ReviewModification | None = None,
+) -> dict[str, object]:
+    summary = {
         "modification_id": modification.modification_id,
         "job_id": modification.job_id,
         "status": modification.status,
@@ -201,6 +217,13 @@ def _modification_summary(modification: ReviewModification) -> dict[str, object]
         "created_at": modification.created_at,
         "updated_at": modification.updated_at,
     }
+    if superseded is not None:
+        summary["superseded"] = {
+            "modification_id": superseded.modification_id,
+            "actor_display_name": superseded.actor_display_name,
+            "modification": superseded.payload,
+        }
+    return summary
 
 
 def _identity_payload(identity: RequestIdentity) -> dict[str, str]:
@@ -447,7 +470,52 @@ async def get_review_job(
     job = _review_job_store().get_job(job_id, identity.workspace_id)
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Review job not found.")
-    return _job_summary(job)
+    return _job_summary(job, include_request=True)
+
+
+@app.put("/api/review-jobs/{job_id}/source-docx", status_code=status.HTTP_204_NO_CONTENT)
+async def upload_review_job_source_docx(
+    job_id: str,
+    file: UploadFile = File(...),
+    x_api_token: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> Response:
+    identity = require_request_identity(x_api_token, x_tenant_id)
+    if _review_job_store().get_job(job_id, identity.workspace_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Review job not found.")
+    if not file.filename or not file.filename.lower().endswith(".docx"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Only .docx files are supported.")
+    file_bytes = await file.read(MAX_UPLOAD_BYTES + 1)
+    if not file_bytes:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty.")
+    if len(file_bytes) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Uploaded file must be 50 MB or smaller.")
+    await run_in_threadpool(save_source_docx, job_id, file_bytes)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.get("/api/review-jobs/{job_id}/source-docx")
+async def download_review_job_source_docx(
+    job_id: str,
+    x_api_token: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> StreamingResponse:
+    identity = require_request_identity(x_api_token, x_tenant_id)
+    job = _review_job_store().get_job(job_id, identity.workspace_id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Review job not found.")
+    file_bytes = await run_in_threadpool(read_source_docx, job_id)
+    if file_bytes is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source document not found for this review job.")
+    request = job.request if isinstance(job.request, dict) else {}
+    filename = request.get("filename") if isinstance(request.get("filename"), str) else "contract.docx"
+    if not filename.lower().endswith(".docx"):
+        filename = f"{Path(filename).stem}.docx"
+    return StreamingResponse(
+        iter([file_bytes]),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/api/review-jobs/{job_id}/modifications")
@@ -474,7 +542,7 @@ async def save_review_job_modification(
 ) -> dict[str, object]:
     identity = require_request_identity(x_api_token, x_tenant_id)
     try:
-        saved = _review_job_store().save_modification(
+        save_result = _review_job_store().save_modification(
             job_id,
             identity.workspace_id,
             modification.model_dump(exclude_none=True),
@@ -483,7 +551,7 @@ async def save_review_job_modification(
         )
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Review job not found.") from exc
-    return _modification_summary(saved)
+    return _modification_summary(save_result.saved, save_result.superseded)
 
 
 @app.post("/api/review-jobs/{job_id}/modifications/{modification_id}/revert")

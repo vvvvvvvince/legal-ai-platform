@@ -1,5 +1,12 @@
 export type ReviewJobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 
+export type ReviewJobRequest = {
+  filename?: string;
+  contract_text?: string;
+  settings?: unknown;
+  document_quality?: unknown;
+};
+
 export type ReviewJob = {
   job_id: string;
   job_type: string;
@@ -9,8 +16,18 @@ export type ReviewJob = {
   finished_at?: string | null;
   updated_at: string;
   attempt_count: number;
+  filename?: string | null;
+  created_by_display_name?: string | null;
+  has_source_docx?: boolean;
+  request?: ReviewJobRequest;
   result?: unknown;
   error?: string | null;
+};
+
+export type ReviewModificationSuperseded = {
+  modification_id: string;
+  actor_display_name: string;
+  modification: ReviewModificationPayload;
 };
 
 export type ReviewModificationPayload = {
@@ -33,6 +50,7 @@ export type ReviewModification = {
   actor_display_name: string;
   created_at: string;
   updated_at: string;
+  superseded?: ReviewModificationSuperseded | null;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -56,6 +74,15 @@ export function normalizeReviewJob(payload: unknown): ReviewJob {
     finished_at: typeof payload.finished_at === "string" ? payload.finished_at : null,
     updated_at: typeof payload.updated_at === "string" ? payload.updated_at : "",
     attempt_count: typeof payload.attempt_count === "number" ? payload.attempt_count : 0,
+    filename: typeof payload.filename === "string" ? payload.filename : null,
+    created_by_display_name: typeof payload.created_by_display_name === "string" ? payload.created_by_display_name : null,
+    has_source_docx: payload.has_source_docx === true,
+    request: isRecord(payload.request) ? {
+      filename: typeof payload.request.filename === "string" ? payload.request.filename : undefined,
+      contract_text: typeof payload.request.contract_text === "string" ? payload.request.contract_text : undefined,
+      settings: payload.request.settings,
+      document_quality: payload.request.document_quality,
+    } : undefined,
     result: payload.result,
     error: typeof payload.error === "string" ? payload.error : null,
   };
@@ -90,6 +117,18 @@ export function normalizeReviewModification(payload: unknown): ReviewModificatio
     actor_display_name: payload.actor_display_name,
     created_at: typeof payload.created_at === "string" ? payload.created_at : "",
     updated_at: typeof payload.updated_at === "string" ? payload.updated_at : "",
+    superseded: isRecord(payload.superseded)
+      && typeof payload.superseded.modification_id === "string"
+      && typeof payload.superseded.actor_display_name === "string"
+      && isRecord(payload.superseded.modification)
+      && typeof payload.superseded.modification.original === "string"
+      && typeof payload.superseded.modification.modified === "string"
+      ? {
+        modification_id: payload.superseded.modification_id,
+        actor_display_name: payload.superseded.actor_display_name,
+        modification: payload.superseded.modification as ReviewModificationPayload,
+      }
+      : null,
   };
 }
 
@@ -144,6 +183,44 @@ export async function cancelReviewJob(jobId: string): Promise<ReviewJob> {
     throw new Error(payload?.detail ?? `审查任务取消失败（${response.status}）。`);
   }
   return normalizeReviewJob(await response.json());
+}
+
+export async function listReviewJobs(): Promise<ReviewJob[]> {
+  const response = await fetch("/api/review-jobs", { headers: apiHeaders() });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null) as { detail?: string } | null;
+    throw new Error(payload?.detail ?? "读取审查记录失败。");
+  }
+  const payload = await response.json();
+  if (!Array.isArray(payload)) throw new Error("审查记录返回了无法识别的数据。");
+  return payload.map(normalizeReviewJob);
+}
+
+export async function uploadReviewJobSourceDocx(jobId: string, file: File): Promise<void> {
+  const formData = new FormData();
+  formData.append("file", file);
+  const response = await fetch(`/api/review-jobs/${encodeURIComponent(jobId)}/source-docx`, {
+    method: "PUT",
+    headers: apiHeaders(),
+    body: formData,
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null) as { detail?: string } | null;
+    throw new Error(payload?.detail ?? "保存原始合同失败。");
+  }
+}
+
+export async function downloadReviewJobSourceDocx(jobId: string, filename: string): Promise<File> {
+  const response = await fetch(`/api/review-jobs/${encodeURIComponent(jobId)}/source-docx`, {
+    headers: apiHeaders(),
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null) as { detail?: string } | null;
+    throw new Error(payload?.detail ?? "读取原始合同失败。");
+  }
+  const blob = await response.blob();
+  const safeName = filename.toLowerCase().endsWith(".docx") ? filename : `${filename.replace(/\.[^.]+$/, "")}.docx`;
+  return new File([blob], safeName, { type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" });
 }
 
 export async function getReviewJob(jobId: string): Promise<ReviewJob> {

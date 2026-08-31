@@ -80,6 +80,12 @@ class ReviewModificationEvent:
     created_at: str
 
 
+@dataclass(frozen=True)
+class ModificationSaveResult:
+    saved: ReviewModification
+    superseded: ReviewModification | None = None
+
+
 class ReviewJobStore:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -331,7 +337,7 @@ class ReviewJobStore:
         *,
         actor_user_id: str,
         actor_display_name: str,
-    ) -> ReviewModification:
+    ) -> ModificationSaveResult:
         if not isinstance(payload, dict):
             raise ValueError("modification payload must be an object")
         payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -340,6 +346,7 @@ class ReviewJobStore:
             risk_key = None
         now = _utc_now()
         modification_id = str(uuid4())
+        superseded_modification: ReviewModification | None = None
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             job = connection.execute(
@@ -350,10 +357,11 @@ class ReviewJobStore:
                 raise KeyError(f"Review job {job_id} does not exist")
             if risk_key is not None:
                 previous = connection.execute(
-                    "SELECT modification_id FROM review_modifications WHERE job_id = ? AND risk_key = ? AND status = 'active'",
+                    "SELECT * FROM review_modifications WHERE job_id = ? AND risk_key = ? AND status = 'active'",
                     (job_id, risk_key),
                 ).fetchone()
                 if previous is not None:
+                    superseded_modification = self._from_modification_row(previous)
                     connection.execute(
                         "UPDATE review_modifications SET status = 'superseded', updated_at = ? WHERE modification_id = ?",
                         (now, previous["modification_id"]),
@@ -384,7 +392,10 @@ class ReviewJobStore:
                 "SELECT * FROM review_modifications WHERE modification_id = ?", (modification_id,)
             ).fetchone()
             connection.commit()
-        return self._from_modification_row(row)  # type: ignore[return-value]
+        return ModificationSaveResult(
+            saved=self._from_modification_row(row),  # type: ignore[return-value]
+            superseded=superseded_modification,
+        )
 
     def get_modification(self, modification_id: str, tenant_id: str) -> ReviewModification | None:
         with self._connect() as connection:

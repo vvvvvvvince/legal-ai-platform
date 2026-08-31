@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
-import { cancelReviewJob, createReviewJob, getReviewJob, shouldPollReviewJob, waitForReviewJob, type ReviewJob } from "../api/reviewJobs";
+import {
+  cancelReviewJob,
+  createReviewJob,
+  getReviewJob,
+  shouldPollReviewJob,
+  uploadReviewJobSourceDocx,
+  waitForReviewJob,
+  type ReviewJob,
+} from "../api/reviewJobs";
 import type { ContractOverviewResponse, DeepReviewFormSettings } from "../domain/reviewTypes";
 
 const STORAGE_KEY = "legal-ai-review-job";
@@ -27,6 +35,7 @@ export function useReviewWorkflow() {
   const submitDeepReview = useCallback(async (
     overview: ContractOverviewResponse,
     settings: DeepReviewFormSettings,
+    sourceFile?: File | null,
   ) => {
     const idempotencyKey = crypto.randomUUID();
     const queued = await createReviewJob({
@@ -41,6 +50,13 @@ export function useReviewWorkflow() {
       filename: overview.filename,
       idempotency_key: idempotencyKey,
     }));
+    if (sourceFile && sourceFile.name.toLowerCase().endsWith(".docx")) {
+      try {
+        await uploadReviewJobSourceDocx(queued.job_id, sourceFile);
+      } catch {
+        // Source docx persistence is best-effort; review results still work from contract_text.
+      }
+    }
     const completed = await waitForReviewJob(queued.job_id, { onUpdate: setActiveJob });
     window.localStorage.removeItem(STORAGE_KEY);
     return completed;
@@ -51,5 +67,9 @@ export function useReviewWorkflow() {
     setActiveJob(await cancelReviewJob(activeJob.job_id));
   }, [activeJob]);
 
-  return { activeJob, submitDeepReview, cancelActiveJob };
+  const selectJob = useCallback((job: ReviewJob | null) => {
+    setActiveJob(job);
+  }, []);
+
+  return { activeJob, submitDeepReview, cancelActiveJob, selectJob };
 }

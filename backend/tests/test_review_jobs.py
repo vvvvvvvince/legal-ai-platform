@@ -167,14 +167,14 @@ def test_modifications_are_scoped_to_job_and_keep_audited_authors(tmp_path):
         {"risk_key": "payment", "original": "先付款", "modified": "验收后付款"},
         actor_user_id="user-a",
         actor_display_name="甲同事",
-    )
+    ).saved
     replacement = store.save_modification(
         job.job_id,
         "shared",
         {"risk_key": "payment", "original": "先付款", "modified": "验收后 30 日付款"},
         actor_user_id="user-b",
         actor_display_name="乙同事",
-    )
+    ).saved
 
     active = store.list_modifications(job.job_id, "shared")
     assert [item.modification_id for item in active] == [replacement.modification_id]
@@ -194,6 +194,30 @@ def test_modifications_are_scoped_to_job_and_keep_audited_authors(tmp_path):
     assert store.list_modifications(job.job_id, "other") == []
 
 
+def test_save_modification_returns_superseded_record(tmp_path):
+    store = ReviewJobStore(tmp_path / "jobs.sqlite3")
+    job = store.create_job(tenant_id="shared", job_type="deep_review", request={})
+
+    first = store.save_modification(
+        job.job_id,
+        "shared",
+        {"risk_key": "payment", "original": "先付款", "modified": "验收后付款"},
+        actor_user_id="user-a",
+        actor_display_name="甲同事",
+    )
+    replacement = store.save_modification(
+        job.job_id,
+        "shared",
+        {"risk_key": "payment", "original": "先付款", "modified": "验收后 30 日付款"},
+        actor_user_id="user-b",
+        actor_display_name="乙同事",
+    )
+
+    assert replacement.superseded is not None
+    assert replacement.superseded.modification_id == first.saved.modification_id
+    assert replacement.superseded.actor_display_name == "甲同事"
+
+
 def test_revert_does_not_cross_review_job_boundaries(tmp_path):
     store = ReviewJobStore(tmp_path / "jobs.sqlite3")
     first_job = store.create_job(tenant_id="shared", job_type="deep_review", request={})
@@ -204,7 +228,7 @@ def test_revert_does_not_cross_review_job_boundaries(tmp_path):
         {"original": "先付款", "modified": "验收后付款"},
         actor_user_id="user-a",
         actor_display_name="甲同事",
-    )
+    ).saved
 
     reverted = store.revert_modification(
         modification.modification_id,

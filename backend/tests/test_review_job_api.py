@@ -90,6 +90,86 @@ def test_shared_workspace_modifications_keep_the_user_who_made_each_change(monke
         assert client.get(f"/api/review-jobs/{job['job_id']}/modifications").json() == []
 
 
+def test_list_review_jobs_returns_workspace_summaries(monkeypatch, tmp_path):
+    auth_db = tmp_path / "auth.sqlite3"
+    job_db = tmp_path / "jobs.sqlite3"
+    files_dir = tmp_path / "files"
+    monkeypatch.setenv("AUTH_DB", str(auth_db))
+    monkeypatch.setenv("REVIEW_JOB_DB", str(job_db))
+    monkeypatch.setenv("REVIEW_JOB_FILES_DIR", str(files_dir))
+    monkeypatch.setenv("REVIEW_JOB_WORKER_ENABLED", "false")
+    auth = AuthStore(auth_db)
+    auth.create_user("alice", "甲同事", "correct-password")
+
+    with TestClient(app) as client:
+        assert client.post("/api/auth/login", json={"username": "alice", "password": "correct-password"}).status_code == 200
+        job = client.post("/api/review-jobs", json=_payload()).json()
+        listed = client.get("/api/review-jobs")
+        assert listed.status_code == 200
+        body = listed.json()
+        assert len(body) == 1
+        assert body[0]["job_id"] == job["job_id"]
+        assert body[0]["filename"] == "contract.docx"
+        assert body[0]["created_by_display_name"] == "甲同事"
+        assert body[0]["has_source_docx"] is False
+
+
+def test_source_docx_round_trip(monkeypatch, tmp_path):
+    auth_db = tmp_path / "auth.sqlite3"
+    job_db = tmp_path / "jobs.sqlite3"
+    files_dir = tmp_path / "files"
+    monkeypatch.setenv("AUTH_DB", str(auth_db))
+    monkeypatch.setenv("REVIEW_JOB_DB", str(job_db))
+    monkeypatch.setenv("REVIEW_JOB_FILES_DIR", str(files_dir))
+    monkeypatch.setenv("REVIEW_JOB_WORKER_ENABLED", "false")
+    auth = AuthStore(auth_db)
+    auth.create_user("alice", "甲同事", "correct-password")
+    docx_bytes = b"PK\x03\x04fake-docx"
+
+    with TestClient(app) as client:
+        assert client.post("/api/auth/login", json={"username": "alice", "password": "correct-password"}).status_code == 200
+        job = client.post("/api/review-jobs", json=_payload()).json()
+        upload = client.put(
+            f"/api/review-jobs/{job['job_id']}/source-docx",
+            files={"file": ("contract.docx", docx_bytes, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+        )
+        assert upload.status_code == 204
+        detail = client.get(f"/api/review-jobs/{job['job_id']}")
+        assert detail.json()["has_source_docx"] is True
+        download = client.get(f"/api/review-jobs/{job['job_id']}/source-docx")
+        assert download.status_code == 200
+        assert download.content == docx_bytes
+
+
+def test_save_modification_reports_superseded_author(monkeypatch, tmp_path):
+    auth_db = tmp_path / "auth.sqlite3"
+    job_db = tmp_path / "jobs.sqlite3"
+    monkeypatch.setenv("AUTH_DB", str(auth_db))
+    monkeypatch.setenv("REVIEW_JOB_DB", str(job_db))
+    monkeypatch.setenv("REVIEW_JOB_WORKER_ENABLED", "false")
+    auth = AuthStore(auth_db)
+    auth.create_user("alice", "甲同事", "correct-password")
+    auth.create_user("bob", "乙同事", "correct-password")
+
+    with TestClient(app) as client:
+        assert client.post("/api/auth/login", json={"username": "alice", "password": "correct-password"}).status_code == 200
+        job = client.post("/api/review-jobs", json=_payload()).json()
+        client.post(
+            f"/api/review-jobs/{job['job_id']}/modifications",
+            json={"risk_key": "payment", "original": "先付款", "modified": "验收后付款"},
+        )
+        client.post("/api/auth/logout")
+        assert client.post("/api/auth/login", json={"username": "bob", "password": "correct-password"}).status_code == 200
+        replacement = client.post(
+            f"/api/review-jobs/{job['job_id']}/modifications",
+            json={"risk_key": "payment", "original": "先付款", "modified": "验收后 30 日付款"},
+        )
+        assert replacement.status_code == 201
+        body = replacement.json()
+        assert body["actor_display_name"] == "乙同事"
+        assert body["superseded"]["actor_display_name"] == "甲同事"
+
+
 def test_worker_persists_successful_result(tmp_path):
     store = ReviewJobStore(tmp_path / "jobs.sqlite3")
     job = store.create_job(tenant_id="local", job_type="deep_review", request={"value": 7})

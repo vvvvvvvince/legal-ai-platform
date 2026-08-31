@@ -14,9 +14,10 @@ import {
 import { useReviewWorkflow } from "./hooks/useReviewWorkflow";
 import { useAuth } from "./hooks/useAuth";
 import { apiHeaders, continueIntakeChat, continueLegalResearch, getContractOverview, isLegalResearchQuestion } from "./api/legalApi";
-import { listReviewModifications, revertReviewModification, saveReviewModification } from "./api/reviewJobs";
+import { downloadReviewJobSourceDocx, getReviewJob, listReviewModifications, revertReviewModification, saveReviewModification } from "./api/reviewJobs";
 import { normalizeReviewResponse } from "./domain/reviewTransforms";
 import { ReviewJobStatus } from "./features/review/ReviewJobStatus";
+import { ReviewRecordsPanel } from "./features/review/ReviewRecordsPanel";
 import { EditorPanel } from "./features/editor/EditorPanel";
 import { IntakePanel } from "./features/intake/IntakePanel";
 import { LegalAssistantMark } from "./features/intake/LegalAssistantMark";
@@ -813,9 +814,20 @@ function downloadBlob(blob: Blob, filename: string) {
   URL.revokeObjectURL(url);
 }
 
+function applySavedModifications(sourceText: string, mods: Modification[]) {
+  let text = sourceText;
+  for (const modification of mods) {
+    if (!modification.original || isMissingClause(modification.original)) continue;
+    const index = text.indexOf(modification.original);
+    if (index < 0) continue;
+    text = `${text.slice(0, index)}${modification.modified}${text.slice(index + modification.original.length)}`;
+  }
+  return text;
+}
+
 export default function App() {
   const auth = useAuth();
-  const { activeJob, submitDeepReview, cancelActiveJob } = useReviewWorkflow();
+  const { activeJob, submitDeepReview, cancelActiveJob, selectJob } = useReviewWorkflow();
   if (!auth.isReady) return <main style={{ minHeight: "100vh", display: "grid", placeItems: "center" }}>正在检查登录状态…</main>;
   if (!auth.identity) return <LoginScreen onLogin={auth.signIn} error={auth.error} />;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -869,6 +881,9 @@ export default function App() {
   const [intakeConversationStep, setIntakeConversationStep] = useState<IntakeConversationStep>("role");
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [readerPanelHeight, setReaderPanelHeight] = useState<number | null>(null);
+  const [showReviewRecords, setShowReviewRecords] = useState(false);
+  const [recoveringJobId, setRecoveringJobId] = useState<string | null>(null);
+  const [modificationConflict, setModificationConflict] = useState<string | null>(null);
   const syncingEditorRef = useRef(false);
   // Every file/reset starts a new review session.  Long-running overview,
   // intake and deep-review calls keep the session number they started with so
@@ -878,22 +893,50 @@ export default function App() {
   useEffect(() => {
     if (reviewStage !== "modification" || !activeJob?.job_id) return;
     let cancelled = false;
-    void listReviewModifications(activeJob.job_id).then((saved) => {
-      if (cancelled) return;
-      const remote = saved.map((item): Modification => ({
-        ...item.modification,
-        modification_id: item.modification_id,
-        actor_user_id: item.actor_user_id,
-        actor_display_name: item.actor_display_name,
-      }));
-      setModifications((previous) => [
-        ...previous.filter((item) => !remote.some((savedItem) => isSameModification(item, savedItem))),
-        ...remote,
-      ]);
-    }).catch((reason: unknown) => {
-      if (!cancelled) setError(getErrorMessage(reason));
-    });
-    return () => { cancelled = true; };
+
+    const syncRemoteModifications = () => {
+      void listReviewModifications(activeJob.job_id).then((saved) => {
+        if (cancelled) return;
+        const remote = saved.map((item): Modification => ({
+          ...item.modification,
+          modification_id: item.modification_id,
+          actor_user_id: item.actor_user_id,
+          actor_display_name: item.actor_display_name,
+        }));
+        setModifications((previous) => {
+          const conflicts: string[] = [];
+          for (const remoteItem of remote) {
+            if (!remoteItem.risk_key) continue;
+            const localItem = previous.find((item) => item.risk_key === remoteItem.risk_key);
+            if (!localItem) continue;
+            if (
+              localItem.modification_id
+              && remoteItem.modification_id
+              && localItem.modification_id !== remoteItem.modification_id
+              && localItem.actor_user_id !== remoteItem.actor_user_id
+            ) {
+              conflicts.push(`“${localItem.item ?? remoteItem.item ?? remoteItem.risk_key}”已被 ${remoteItem.actor_display_name} 覆盖。`);
+            }
+          }
+          if (conflicts.length) {
+            setModificationConflict(conflicts.join(" "));
+          }
+          return [
+            ...previous.filter((item) => !remote.some((savedItem) => isSameModification(item, savedItem))),
+            ...remote,
+          ];
+        });
+      }).catch((reason: unknown) => {
+        if (!cancelled) setError(getErrorMessage(reason));
+      });
+    };
+
+    syncRemoteModifications();
+    const timer = window.setInterval(syncRemoteModifications, 8000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
   }, [activeJob?.job_id, reviewStage]);
 
   function isSameModification(left: Modification, right: Modification) {
@@ -918,6 +961,10 @@ export default function App() {
         actor_display_name: saved.actor_display_name,
       };
       setModifications((previous) => previous.map((item) => isSameModification(item, modification) ? persisted : item));
+      if (saved.superseded && saved.superseded.actor_display_name !== (auth.identity?.display_name ?? "")) {
+        const label = saved.modification.item ?? saved.modification.risk_key ?? "该风险项";
+        setModificationConflict(`你已覆盖 ${saved.superseded.actor_display_name} 对“${label}”的修改。`);
+      }
     }).catch((reason: unknown) => {
       setError(getErrorMessage(reason));
     });
@@ -1896,6 +1943,58 @@ export default function App() {
     void cancelActiveJob().catch((cancelError) => setError(getErrorMessage(cancelError)));
   }
 
+  async function recoverReviewJob(jobId: string) {
+    const workflowEpoch = ++workflowEpochRef.current;
+    setRecoveringJobId(jobId);
+    setIsLoading(true);
+    setError(null);
+    setModificationConflict(null);
+    try {
+      const job = await getReviewJob(jobId);
+      if (job.status !== "succeeded" || !job.result) {
+        throw new Error("该审查任务尚未完成，无法恢复工作区。");
+      }
+      const filename = job.filename ?? job.request?.filename ?? "contract.docx";
+      const contractText = job.request?.contract_text ?? "";
+      const result = normalizeReviewResponse(job.result, filename);
+      const baseText = result.contract_text ?? contractText;
+      const saved = await listReviewModifications(jobId);
+      const remoteMods = saved.map((item): Modification => ({
+        ...item.modification,
+        modification_id: item.modification_id,
+        actor_user_id: item.actor_user_id,
+        actor_display_name: item.actor_display_name,
+      }));
+      let recoveredFile: File | null = null;
+      if (job.has_source_docx) {
+        recoveredFile = await downloadReviewJobSourceDocx(jobId, filename);
+      }
+      if (workflowEpochRef.current !== workflowEpoch) return;
+      selectJob(job);
+      setFile(recoveredFile);
+      setReview({ ...result, contract_text: baseText, manual_review_required: true });
+      setContractOverview(null);
+      setModifications(remoteMods);
+      setEditorText(remoteMods.length ? applySavedModifications(baseText, remoteMods) : baseText);
+      setReviewStage("modification");
+      setShowReviewRecords(false);
+      setIsSidebarCollapsed(false);
+      setEditorNotice(
+        remoteMods.length
+          ? `已恢复共享审查记录，并载入 ${remoteMods.length} 条已保存修改。`
+          : "已恢复共享审查记录，可继续处理右侧建议。"
+      );
+    } catch (recoveryError) {
+      if (workflowEpochRef.current !== workflowEpoch) return;
+      setError(getErrorMessage(recoveryError));
+    } finally {
+      if (workflowEpochRef.current === workflowEpoch) {
+        setRecoveringJobId(null);
+        setIsLoading(false);
+      }
+    }
+  }
+
   async function runDeepReview() {
     if (!contractOverview) return;
     if (!deepReviewSettings.party_role) {
@@ -1913,7 +2012,7 @@ export default function App() {
     setError(null);
     try {
       setEditorNotice("深度审查任务已排队，系统会持续查询执行结果…");
-      const completedJob = await submitDeepReview(contractOverview, settingsForReview);
+      const completedJob = await submitDeepReview(contractOverview, settingsForReview, file);
       if (completedJob.status === "failed") {
         throw new Error(completedJob.error ?? "深度审查任务执行失败，请重试。");
       }
@@ -1995,13 +2094,24 @@ export default function App() {
   }
 
   async function handleExport() {
-    if (file && !file.name.toLowerCase().endsWith(".docx")) {
+    let exportFile = file;
+    if (exportFile && !exportFile.name.toLowerCase().endsWith(".docx")) {
       setError("PDF can be reviewed, but Word tracked-change export is not supported.");
       return;
     }
 
-    if (!file) {
-      setError("请先选择一份 .docx 合同。");
+    if (!exportFile && activeJob?.has_source_docx && activeJob.job_id) {
+      try {
+        exportFile = await downloadReviewJobSourceDocx(activeJob.job_id, review?.filename ?? "contract.docx");
+        setFile(exportFile);
+      } catch (downloadError) {
+        setError(getErrorMessage(downloadError));
+        return;
+      }
+    }
+
+    if (!exportFile) {
+      setError("请先选择一份 .docx 合同，或确保该审查记录已保存 Word 原件。");
       return;
     }
 
@@ -2019,7 +2129,7 @@ export default function App() {
     setError(null);
 
     try {
-      const exportResult = await exportReviewedContract(file, exportModifications, activeJob?.job_id);
+      const exportResult = await exportReviewedContract(exportFile, exportModifications, activeJob?.job_id);
       downloadBlob(exportResult.blob, "reviewed_contract.docx");
       setEditorNotice(
         exportResult.skipped > 0
@@ -2212,6 +2322,31 @@ export default function App() {
 
   return (
     <main className={`app-shell ${review ? "app-shell-review" : "app-shell-chat"}`}>
+      <header className="topbar">
+        <div className="brand-block">
+          <span className="brand-mark" aria-hidden="true">AI</span>
+          <div>
+            <strong>AI 法务助手</strong>
+            <span>共享合同审查工作区</span>
+          </div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <button className="secondary-button" type="button" onClick={() => setShowReviewRecords(true)}>
+            审查记录
+          </button>
+          <button className="topbar-session" type="button" onClick={() => void auth.signOut()}>
+            <span className="topbar-session-dot" aria-hidden="true" />
+            {auth.identity?.display_name ?? auth.identity?.username}
+            <small>退出</small>
+          </button>
+        </div>
+      </header>
+      <ReviewRecordsPanel
+        open={showReviewRecords}
+        onClose={() => setShowReviewRecords(false)}
+        onRecover={(jobId) => void recoverReviewJob(jobId)}
+        recoveringJobId={recoveringJobId}
+      />
       <div className={`workbench-shell${!review ? " workbench-shell-chat" : ""}`}>
         <div className="workbench-main">
           <input
@@ -2271,6 +2406,12 @@ export default function App() {
               </div>
             ) : null}
             <ReviewJobStatus job={activeJob} />
+            {modificationConflict ? (
+              <div className="review-conflict-banner" role="status">
+                <p>{modificationConflict}</p>
+                <button className="secondary-button" type="button" onClick={() => setModificationConflict(null)}>知道了</button>
+              </div>
+            ) : null}
 
             {error ? <p className="error-message">{error}</p> : null}
             <EditorPanel

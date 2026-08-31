@@ -30,3 +30,16 @@ test("normalizes a shared modification with its server-side author", () => {
   assert.equal(modification.actor_display_name, "甲同事");
   assert.equal(modification.modification.modified, "验收后付款");
 });
+
+test("normalizes review job summaries for the records list", () => {
+  const job = normalizeReviewJob({
+    job_id: "j1",
+    status: "succeeded",
+    filename: "contract.docx",
+    created_by_display_name: "甲同事",
+    has_source_docx: true,
+  });
+  assert.equal(job.filename, "contract.docx");
+  assert.equal(job.created_by_display_name, "甲同事");
+  assert.equal(job.has_source_docx, true);
+});
