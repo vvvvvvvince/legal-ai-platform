@@ -1,6 +1,7 @@
 import os
 import json
 import secrets
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -72,9 +73,41 @@ class LoginRequest(BaseModel):
     username: str
     password: str
 
+
+@asynccontextmanager
+async def review_job_lifespan(application: FastAPI):
+    auth = AuthStore(auth_db_path())
+    auth.cleanup_sessions()
+    if os.getenv("APP_ENV", "development").lower() in {"production", "prod"} and not auth.has_active_users():
+        raise RuntimeError("No active users configured; run scripts/bootstrap_users.py before production startup.")
+    store = _review_job_store()
+    store.recover_running_jobs()
+    store.cleanup_expired(int(job_runtime_config()["retention_days"]))
+    enabled = os.getenv("REVIEW_JOB_WORKER_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+    if enabled:
+        worker = ReviewJobWorker(
+            store,
+            _execute_deep_review_job,
+            poll_seconds=float(os.getenv("REVIEW_JOB_POLL_SECONDS", "1")),
+            concurrency=max(1, int(os.getenv("REVIEW_JOB_WORKER_CONCURRENCY", "2"))),
+            lease_seconds=float(os.getenv("REVIEW_JOB_LEASE_SECONDS", "120")),
+            heartbeat_interval=float(os.getenv("REVIEW_JOB_HEARTBEAT_SECONDS", "30")),
+        )
+        worker.start()
+        application.state.review_job_worker = worker
+    try:
+        yield
+    finally:
+        worker = getattr(application.state, "review_job_worker", None)
+        if worker is not None:
+            worker.stop()
+        application.state.review_job_worker = None
+
+
 app = FastAPI(
     title="Legal AI Platform API",
     version="0.1.0",
+    lifespan=review_job_lifespan,
 )
 
 app.add_middleware(
@@ -153,37 +186,6 @@ def _job_summary(job: ReviewJob) -> dict[str, object]:
     if job.status in {"failed", "cancelled"}:
         summary["error"] = job.error
     return summary
-
-
-@app.on_event("startup")
-def start_review_job_worker() -> None:
-    auth = AuthStore(auth_db_path())
-    auth.cleanup_sessions()
-    if os.getenv("APP_ENV", "development").lower() in {"production", "prod"} and not auth.has_active_users():
-        raise RuntimeError("No active users configured; run scripts/bootstrap_users.py before production startup.")
-    store = _review_job_store()
-    store.recover_running_jobs()
-    store.cleanup_expired(int(job_runtime_config()["retention_days"]))
-    enabled = os.getenv("REVIEW_JOB_WORKER_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
-    if enabled:
-        worker = ReviewJobWorker(
-            store,
-            _execute_deep_review_job,
-            poll_seconds=float(os.getenv("REVIEW_JOB_POLL_SECONDS", "1")),
-            concurrency=max(1, int(os.getenv("REVIEW_JOB_WORKER_CONCURRENCY", "2"))),
-            lease_seconds=float(os.getenv("REVIEW_JOB_LEASE_SECONDS", "120")),
-            heartbeat_interval=float(os.getenv("REVIEW_JOB_HEARTBEAT_SECONDS", "30")),
-        )
-        worker.start()
-        app.state.review_job_worker = worker
-
-
-@app.on_event("shutdown")
-def stop_review_job_worker() -> None:
-    worker = getattr(app.state, "review_job_worker", None)
-    if worker is not None:
-        worker.stop()
-    app.state.review_job_worker = None
 
 
 def _identity_payload(identity: RequestIdentity) -> dict[str, str]:

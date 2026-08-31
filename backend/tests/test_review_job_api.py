@@ -15,6 +15,12 @@ def _payload():
     }
 
 
+def test_app_uses_lifespan_context_instead_of_legacy_events():
+    assert app.router.on_startup == []
+    assert app.router.on_shutdown == []
+    assert app.router.lifespan_context.__name__ == "review_job_lifespan"
+
+
 def test_create_review_job_returns_202_and_tenant_filters_lookup(monkeypatch, tmp_path):
     monkeypatch.setenv("REVIEW_JOB_DB", str(tmp_path / "jobs.sqlite3"))
     monkeypatch.setenv("REVIEW_JOB_WORKER_ENABLED", "false")
