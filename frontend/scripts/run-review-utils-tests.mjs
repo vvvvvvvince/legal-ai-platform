@@ -11,6 +11,7 @@ const jobsOutput = path.join(outDir, "reviewJobs.js");
 const testFile = path.join(root, "tests", "review-utils.test.mjs");
 const jobsTestFile = path.join(root, "tests", "review-job-utils.test.mjs");
 const assistantMarkTestFile = path.join(root, "tests", "legal-assistant-mark.test.mjs");
+const viteChunksTestFile = path.join(root, "tests", "vite-chunks.test.mjs");
 
 const ts = await import(pathToFileURL(path.join(root, "node_modules", "typescript", "lib", "typescript.js")).href);
 
@@ -42,6 +43,7 @@ try {
   await import(pathToFileURL(testFile).href);
   await import(pathToFileURL(jobsTestFile).href);
   await import(pathToFileURL(assistantMarkTestFile).href);
+  await import(pathToFileURL(viteChunksTestFile).href);
 } finally {
   await rm(outDir, { recursive: true, force: true });
 }
