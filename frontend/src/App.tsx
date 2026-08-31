@@ -817,9 +817,13 @@ function downloadBlob(blob: Blob, filename: string) {
 
 export default function App() {
   const auth = useAuth();
-  const { activeJob, submitDeepReview, cancelActiveJob, selectJob } = useReviewWorkflow();
   if (!auth.isReady) return <main style={{ minHeight: "100vh", display: "grid", placeItems: "center" }}>正在检查登录状态…</main>;
   if (!auth.identity) return <LoginScreen onLogin={auth.signIn} error={auth.error} />;
+  return <AuthenticatedWorkspace auth={auth} />;
+}
+
+function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) {
+  const { activeJob, submitDeepReview, cancelActiveJob, selectJob } = useReviewWorkflow();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const highlightedParagraphRef = useRef<HTMLElement | null>(null);
   const insertionParagraphRef = useRef<HTMLElement | null>(null);
