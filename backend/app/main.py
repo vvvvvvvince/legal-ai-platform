@@ -47,7 +47,7 @@ from app.services.request_auth import (
     reset_current_identity,
     set_current_identity,
 )
-from app.services.review_jobs import ReviewJob, ReviewJobStore, ReviewJobWorker
+from app.services.review_jobs import IdempotencyConflict, ReviewJob, ReviewJobStore, ReviewJobWorker
 
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 API_VERSION = "2026.08.18-chat-intake"
@@ -150,7 +150,7 @@ def _job_summary(job: ReviewJob) -> dict[str, object]:
     }
     if job.status == "succeeded":
         summary["result"] = job.result
-    if job.status == "failed":
+    if job.status in {"failed", "cancelled"}:
         summary["error"] = job.error
     return summary
 
@@ -166,6 +166,7 @@ def start_review_job_worker() -> None:
             store,
             _execute_deep_review_job,
             poll_seconds=float(os.getenv("REVIEW_JOB_POLL_SECONDS", "1")),
+            concurrency=max(1, int(os.getenv("REVIEW_JOB_WORKER_CONCURRENCY", "2"))),
         )
         worker.start()
         app.state.review_job_worker = worker
@@ -362,13 +363,33 @@ async def create_review_job(
     request: DeepReviewRequest,
     x_api_token: str | None = Header(default=None),
     x_tenant_id: str | None = Header(default=None),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> dict[str, object]:
     identity = require_request_identity(x_api_token, x_tenant_id)
-    job = _review_job_store().create_job(
-        tenant_id=identity.workspace_id,
-        job_type="deep_review",
-        request=request.model_dump(mode="json"),
-    )
+    try:
+        job = _review_job_store().create_job(
+            tenant_id=identity.workspace_id,
+            job_type="deep_review",
+            request=request.model_dump(mode="json"),
+            created_by_user_id=identity.user_id,
+            created_by_display_name=identity.display_name,
+            idempotency_key=idempotency_key,
+        )
+    except IdempotencyConflict as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return _job_summary(job)
+
+
+@app.post("/api/review-jobs/{job_id}/cancel")
+async def cancel_review_job(
+    job_id: str,
+    x_api_token: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> dict[str, object]:
+    identity = require_request_identity(x_api_token, x_tenant_id)
+    job = _review_job_store().request_cancel(job_id, identity.workspace_id)
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Review job not found.")
     return _job_summary(job)
 
 

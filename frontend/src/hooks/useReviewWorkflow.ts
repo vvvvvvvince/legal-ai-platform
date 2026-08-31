@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { createReviewJob, getReviewJob, waitForReviewJob, type ReviewJob } from "../api/reviewJobs";
+import { cancelReviewJob, createReviewJob, getReviewJob, shouldPollReviewJob, waitForReviewJob, type ReviewJob } from "../api/reviewJobs";
 import type { ContractOverviewResponse, DeepReviewFormSettings } from "../domain/reviewTypes";
 
 const STORAGE_KEY = "legal-ai-review-job";
@@ -16,7 +16,7 @@ export function useReviewWorkflow() {
       void getReviewJob(saved.job_id)
         .then((job) => {
           setActiveJob(job);
-          if (job.status === "succeeded" || job.status === "failed") window.localStorage.removeItem(STORAGE_KEY);
+          if (job.status === "succeeded" || job.status === "failed" || job.status === "cancelled") window.localStorage.removeItem(STORAGE_KEY);
         })
         .catch(() => window.localStorage.removeItem(STORAGE_KEY));
     } catch {
@@ -28,21 +28,28 @@ export function useReviewWorkflow() {
     overview: ContractOverviewResponse,
     settings: DeepReviewFormSettings,
   ) => {
+    const idempotencyKey = crypto.randomUUID();
     const queued = await createReviewJob({
       filename: overview.filename,
       contract_text: overview.contract_text,
       settings,
       document_quality: overview.document_quality ?? null,
-    });
+    }, idempotencyKey);
     setActiveJob(queued);
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify({
       job_id: queued.job_id,
       filename: overview.filename,
+      idempotency_key: idempotencyKey,
     }));
     const completed = await waitForReviewJob(queued.job_id, { onUpdate: setActiveJob });
     window.localStorage.removeItem(STORAGE_KEY);
     return completed;
   }, []);
 
-  return { activeJob, submitDeepReview };
+  const cancelActiveJob = useCallback(async () => {
+    if (!activeJob || !shouldPollReviewJob(activeJob.status)) return;
+    setActiveJob(await cancelReviewJob(activeJob.job_id));
+  }, [activeJob]);
+
+  return { activeJob, submitDeepReview, cancelActiveJob };
 }

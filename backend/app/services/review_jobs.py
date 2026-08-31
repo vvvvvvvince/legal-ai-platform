@@ -21,7 +21,11 @@ from uuid import uuid4
 logger = logging.getLogger(__name__)
 
 
-JOB_STATUSES = {"queued", "running", "succeeded", "failed"}
+JOB_STATUSES = {"queued", "running", "succeeded", "failed", "cancelled"}
+
+
+class IdempotencyConflict(ValueError):
+    pass
 
 
 def _utc_now() -> str:
@@ -42,6 +46,14 @@ class ReviewJob:
     finished_at: str | None
     updated_at: str
     attempt_count: int
+    workspace_id: str = "shared"
+    created_by_user_id: str = "system-legacy"
+    created_by_display_name: str = "Legacy"
+    idempotency_key: str | None = None
+    lease_owner: str | None = None
+    lease_expires_at: str | None = None
+    heartbeat_at: str | None = None
+    cancel_requested_at: str | None = None
 
 
 class ReviewJobStore:
@@ -72,13 +84,38 @@ class ReviewJobStore:
                     finished_at TEXT,
                     updated_at TEXT NOT NULL,
                     attempt_count INTEGER NOT NULL DEFAULT 0
+                    ,workspace_id TEXT NOT NULL DEFAULT 'shared'
+                    ,created_by_user_id TEXT NOT NULL DEFAULT 'system-legacy'
+                    ,created_by_display_name TEXT NOT NULL DEFAULT 'Legacy'
+                    ,idempotency_key TEXT
+                    ,lease_owner TEXT
+                    ,lease_expires_at TEXT
+                    ,heartbeat_at TEXT
+                    ,cancel_requested_at TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_review_jobs_queue
                     ON review_jobs(status, created_at);
                 CREATE INDEX IF NOT EXISTS idx_review_jobs_tenant
                     ON review_jobs(tenant_id, created_at);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_review_jobs_idempotency
+                    ON review_jobs(tenant_id, idempotency_key)
+                    WHERE idempotency_key IS NOT NULL;
                 """
             )
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(review_jobs)")}
+            additions = {
+                "workspace_id": "TEXT NOT NULL DEFAULT 'shared'",
+                "created_by_user_id": "TEXT NOT NULL DEFAULT 'system-legacy'",
+                "created_by_display_name": "TEXT NOT NULL DEFAULT 'Legacy'",
+                "idempotency_key": "TEXT",
+                "lease_owner": "TEXT",
+                "lease_expires_at": "TEXT",
+                "heartbeat_at": "TEXT",
+                "cancel_requested_at": "TEXT",
+            }
+            for name, definition in additions.items():
+                if name not in columns:
+                    connection.execute(f"ALTER TABLE review_jobs ADD COLUMN {name} {definition}")
 
     @staticmethod
     def _from_row(row: sqlite3.Row | None) -> ReviewJob | None:
@@ -97,6 +134,14 @@ class ReviewJobStore:
             finished_at=row["finished_at"],
             updated_at=row["updated_at"],
             attempt_count=int(row["attempt_count"]),
+            workspace_id=row["workspace_id"] if "workspace_id" in row.keys() else row["tenant_id"],
+            created_by_user_id=row["created_by_user_id"] if "created_by_user_id" in row.keys() else "system-legacy",
+            created_by_display_name=row["created_by_display_name"] if "created_by_display_name" in row.keys() else "Legacy",
+            idempotency_key=row["idempotency_key"] if "idempotency_key" in row.keys() else None,
+            lease_owner=row["lease_owner"] if "lease_owner" in row.keys() else None,
+            lease_expires_at=row["lease_expires_at"] if "lease_expires_at" in row.keys() else None,
+            heartbeat_at=row["heartbeat_at"] if "heartbeat_at" in row.keys() else None,
+            cancel_requested_at=row["cancel_requested_at"] if "cancel_requested_at" in row.keys() else None,
         )
 
     def create_job(
@@ -105,18 +150,32 @@ class ReviewJobStore:
         tenant_id: str,
         job_type: str,
         request: dict[str, Any],
+        created_by_user_id: str = "system-legacy",
+        created_by_display_name: str = "Legacy",
+        idempotency_key: str | None = None,
     ) -> ReviewJob:
         now = _utc_now()
         job_id = str(uuid4())
         with self._connect() as connection:
+            if idempotency_key:
+                existing = connection.execute(
+                    "SELECT * FROM review_jobs WHERE tenant_id = ? AND idempotency_key = ?",
+                    (tenant_id, idempotency_key),
+                ).fetchone()
+                if existing is not None:
+                    if existing["request_json"] != json.dumps(request, ensure_ascii=False):
+                        raise IdempotencyConflict("Idempotency key was already used with a different request.")
+                    return self._from_row(existing)  # type: ignore[return-value]
             connection.execute(
                 """
                 INSERT INTO review_jobs(
                     job_id, tenant_id, job_type, status, request_json,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, 'queued', ?, ?, ?)
+                    created_at, updated_at, workspace_id, created_by_user_id,
+                    created_by_display_name, idempotency_key
+                ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (job_id, tenant_id, job_type, json.dumps(request, ensure_ascii=False), now, now),
+                (job_id, tenant_id, job_type, json.dumps(request, ensure_ascii=False), now, now,
+                 tenant_id, created_by_user_id, created_by_display_name, idempotency_key),
             )
             row = connection.execute(
                 "SELECT * FROM review_jobs WHERE job_id = ?", (job_id,)
@@ -131,29 +190,33 @@ class ReviewJobStore:
             ).fetchone()
         return self._from_row(row)
 
-    def claim_next_job(self) -> ReviewJob | None:
-        now = _utc_now()
+    def claim_next_job(self, worker_id: str = "worker", lease_seconds: int = 120) -> ReviewJob | None:
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        lease_expires = (now_dt + timedelta(seconds=max(10, lease_seconds))).isoformat()
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 """
                 SELECT * FROM review_jobs
-                WHERE status = 'queued'
+                WHERE (status = 'queued' AND cancel_requested_at IS NULL)
+                   OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?)
                 ORDER BY created_at ASC
                 LIMIT 1
-                """
-            ).fetchone()
+                """, (now,)).fetchone()
             if row is None:
                 connection.commit()
                 return None
             connection.execute(
                 """
                 UPDATE review_jobs
-                SET status = 'running', started_at = ?, updated_at = ?,
-                    attempt_count = attempt_count + 1
-                WHERE job_id = ? AND status = 'queued'
+                SET status = 'running', started_at = COALESCE(started_at, ?), updated_at = ?,
+                    attempt_count = attempt_count + 1, lease_owner = ?,
+                    lease_expires_at = ?, heartbeat_at = ?
+                WHERE job_id = ? AND ((status = 'queued' AND cancel_requested_at IS NULL)
+                    OR (status = 'running' AND lease_expires_at < ?))
                 """,
-                (now, now, row["job_id"]),
+                (now, now, worker_id, lease_expires, now, row["job_id"], now),
             )
             claimed = connection.execute(
                 "SELECT * FROM review_jobs WHERE job_id = ?", (row["job_id"],)
@@ -161,11 +224,21 @@ class ReviewJobStore:
             connection.commit()
         return self._from_row(claimed)
 
-    def complete_job(self, job_id: str, result: dict[str, Any]) -> None:
-        self._finish_job(job_id, "succeeded", result=result)
+    def heartbeat(self, job_id: str, worker_id: str, lease_seconds: int = 120) -> bool:
+        now_dt = datetime.now(timezone.utc)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """UPDATE review_jobs SET lease_expires_at = ?, heartbeat_at = ?, updated_at = ?
+                   WHERE job_id = ? AND status = 'running' AND lease_owner = ?""",
+                ((now_dt + timedelta(seconds=max(10, lease_seconds))).isoformat(), now_dt.isoformat(), now_dt.isoformat(), job_id, worker_id),
+            )
+        return cursor.rowcount == 1
 
-    def fail_job(self, job_id: str, error_message: str) -> None:
-        self._finish_job(job_id, "failed", error_message=error_message)
+    def complete_job(self, job_id: str, result: dict[str, Any], worker_id: str = "worker") -> None:
+        self._finish_job(job_id, "succeeded", result=result, worker_id=worker_id)
+
+    def fail_job(self, job_id: str, error_message: str, worker_id: str = "worker") -> None:
+        self._finish_job(job_id, "failed", error_message=error_message, worker_id=worker_id)
 
     def _finish_job(
         self,
@@ -174,6 +247,7 @@ class ReviewJobStore:
         *,
         result: dict[str, Any] | None = None,
         error_message: str | None = None,
+        worker_id: str = "worker",
     ) -> None:
         if status not in {"succeeded", "failed"}:
             raise ValueError(f"Unsupported terminal status: {status}")
@@ -184,7 +258,7 @@ class ReviewJobStore:
                 UPDATE review_jobs
                 SET status = ?, result_json = ?, error_message = ?,
                     finished_at = ?, updated_at = ?
-                WHERE job_id = ? AND status = 'running'
+                WHERE job_id = ? AND status = 'running' AND lease_owner = ?
                 """,
                 (
                     status,
@@ -192,7 +266,7 @@ class ReviewJobStore:
                     error_message,
                     now,
                     now,
-                    job_id,
+                    job_id, worker_id,
                 ),
             )
             if cursor.rowcount != 1:
@@ -205,11 +279,33 @@ class ReviewJobStore:
                 """
                 UPDATE review_jobs
                 SET status = 'queued', started_at = NULL, updated_at = ?
-                WHERE status = 'running'
+                WHERE status = 'running' AND (lease_expires_at IS NULL OR lease_expires_at < ?)
                 """,
-                (now,),
+                (now, now),
             )
             return cursor.rowcount
+
+    def request_cancel(self, job_id: str, tenant_id: str) -> ReviewJob | None:
+        now = _utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                """UPDATE review_jobs SET cancel_requested_at = ?, updated_at = ?,
+                   status = CASE WHEN status = 'queued' THEN 'failed' ELSE status END,
+                   error_message = CASE WHEN status = 'queued' THEN '任务已取消。' ELSE error_message END,
+                   finished_at = CASE WHEN status = 'queued' THEN ? ELSE finished_at END
+                   WHERE job_id = ? AND tenant_id = ? AND status IN ('queued', 'running')""",
+                (now, now, now, job_id, tenant_id),
+            )
+            row = connection.execute("SELECT * FROM review_jobs WHERE job_id = ? AND tenant_id = ?", (job_id, tenant_id)).fetchone()
+        return self._from_row(row)
+
+    def is_cancel_requested(self, job_id: str, worker_id: str) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT cancel_requested_at FROM review_jobs WHERE job_id = ? AND lease_owner = ?",
+                (job_id, worker_id),
+            ).fetchone()
+        return bool(row and row["cancel_requested_at"])
 
     def cleanup_expired(self, retention_days: int) -> int:
         if retention_days < 0:
@@ -230,38 +326,45 @@ class ReviewJobStore:
 class ReviewJobWorker:
     """Small in-process worker used by the local deployment."""
 
-    def __init__(self, store: ReviewJobStore, review_fn, poll_seconds: float = 1.0) -> None:
+    def __init__(self, store: ReviewJobStore, review_fn, poll_seconds: float = 1.0, concurrency: int = 1) -> None:
         self.store = store
         self.review_fn = review_fn
         self.poll_seconds = max(0.1, poll_seconds)
+        self.concurrency = max(1, concurrency)
         self._stop_event = threading.Event()
-        self._thread: threading.Thread | None = None
+        self._threads: list[threading.Thread] = []
 
     def start(self) -> None:
-        if self._thread and self._thread.is_alive():
+        if any(thread.is_alive() for thread in self._threads):
             return
         self._stop_event.clear()
-        self._thread = threading.Thread(target=self._run, name="review-job-worker", daemon=True)
-        self._thread.start()
+        self._threads = [threading.Thread(target=self._run, name=f"review-job-worker-{i}", daemon=True) for i in range(self.concurrency)]
+        for thread in self._threads:
+            thread.start()
 
     def stop(self) -> None:
         self._stop_event.set()
-        if self._thread:
-            self._thread.join(timeout=5)
-        self._thread = None
+        for thread in self._threads:
+            thread.join(timeout=5)
+        self._threads = []
 
     def run_once(self) -> bool:
-        job = self.store.claim_next_job()
+        worker_id = threading.current_thread().name
+        job = self.store.claim_next_job(worker_id=worker_id)
         if job is None:
             return False
         try:
             result = self.review_fn(job.request)
-            self.store.complete_job(job.job_id, result)
+            if self.store.is_cancel_requested(job.job_id, worker_id):
+                self.store.fail_job(job.job_id, "任务已取消。", worker_id=worker_id)
+            else:
+                self.store.complete_job(job.job_id, result, worker_id=worker_id)
         except Exception:
             logger.exception("Review job %s failed", job.job_id)
             self.store.fail_job(
                 job.job_id,
                 "审查任务执行失败，请检查模型服务后重试。",
+                worker_id=worker_id,
             )
         return True
 

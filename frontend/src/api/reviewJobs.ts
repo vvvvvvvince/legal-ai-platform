@@ -1,4 +1,4 @@
-export type ReviewJobStatus = "queued" | "running" | "succeeded" | "failed";
+export type ReviewJobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 
 export type ReviewJob = {
   job_id: string;
@@ -22,7 +22,7 @@ export function normalizeReviewJob(payload: unknown): ReviewJob {
     throw new Error("审查任务返回了无法识别的数据。");
   }
   const status = payload.status;
-  if (status !== "queued" && status !== "running" && status !== "succeeded" && status !== "failed") {
+  if (status !== "queued" && status !== "running" && status !== "succeeded" && status !== "failed" && status !== "cancelled") {
     throw new Error("审查任务返回了无效状态。");
   }
   return {
@@ -67,15 +67,27 @@ export function apiHeaders(): Record<string, string> {
   return {};
 }
 
-export async function createReviewJob(request: unknown): Promise<ReviewJob> {
+export async function createReviewJob(request: unknown, idempotencyKey?: string): Promise<ReviewJob> {
   const response = await fetch("/api/review-jobs", {
     method: "POST",
-    headers: { ...apiHeaders(), "Content-Type": "application/json" },
+    headers: { ...apiHeaders(), "Content-Type": "application/json", ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) },
     body: JSON.stringify(request),
   });
   if (!response.ok) {
     const payload = await response.json().catch(() => null) as { detail?: string } | null;
     throw new Error(payload?.detail ?? `审查任务创建失败（${response.status}）。`);
+  }
+  return normalizeReviewJob(await response.json());
+}
+
+export async function cancelReviewJob(jobId: string): Promise<ReviewJob> {
+  const response = await fetch(`/api/review-jobs/${encodeURIComponent(jobId)}/cancel`, {
+    method: "POST",
+    headers: apiHeaders(),
+  });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null) as { detail?: string } | null;
+    throw new Error(payload?.detail ?? `审查任务取消失败（${response.status}）。`);
   }
   return normalizeReviewJob(await response.json());
 }

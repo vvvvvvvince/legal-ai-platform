@@ -5,6 +5,7 @@ const labels: Record<ReviewJob["status"], string> = {
   running: "执行中",
   succeeded: "已完成",
   failed: "失败",
+  cancelled: "已取消",
 };
 
 export function ReviewJobStatus({ job }: { job: ReviewJob | null }) {
