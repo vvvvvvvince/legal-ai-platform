@@ -6931,3 +6931,48 @@ body {
   margin: 0;
   font-size: 0.9rem;
 }
+
+/* Keep the composer fully visible below the shared workspace topbar.
+   Earlier cascade locks sized the chat shell to 100dvh, which overflowed
+   the viewport after the topbar was added. */
+#root .app-shell-chat {
+  display: flex;
+  height: 100dvh;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+#root .app-shell-chat .topbar {
+  flex: 0 0 auto;
+  margin-bottom: 0;
+}
+
+#root .app-shell-chat .workbench-shell-chat,
+#root .app-shell-chat .workbench-shell-chat .workbench-main {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+}
+
+#root .app-shell-chat .legal-chat-shell-openc {
+  height: auto;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+#root .app-shell-chat .legal-chat-shell-openc .legal-chat-timeline {
+  padding-bottom: 16px;
+}
+
+#root .app-shell-chat .legal-chat-shell-openc .legal-chat-dock {
+  padding-top: 8px;
+  padding-bottom: max(10px, env(safe-area-inset-bottom));
+}
+
+#root .app-shell-chat .legal-chat-shell-empty .legal-chat-dock {
+  align-self: stretch;
+  padding-top: 8px;
+}
