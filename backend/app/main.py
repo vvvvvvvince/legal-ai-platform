@@ -157,6 +157,9 @@ def _job_summary(job: ReviewJob) -> dict[str, object]:
 
 @app.on_event("startup")
 def start_review_job_worker() -> None:
+    auth = AuthStore(auth_db_path())
+    if os.getenv("APP_ENV", "development").lower() in {"production", "prod"} and not auth.has_active_users():
+        raise RuntimeError("No active users configured; run scripts/bootstrap_users.py before production startup.")
     store = _review_job_store()
     store.recover_running_jobs()
     store.cleanup_expired(int(job_runtime_config()["retention_days"]))
