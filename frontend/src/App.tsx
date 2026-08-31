@@ -813,7 +813,7 @@ function downloadBlob(blob: Blob, filename: string) {
 
 export default function App() {
   const auth = useAuth();
-  const { activeJob, submitDeepReview } = useReviewWorkflow();
+  const { activeJob, submitDeepReview, cancelActiveJob } = useReviewWorkflow();
   if (!auth.isReady) return <main style={{ minHeight: "100vh", display: "grid", placeItems: "center" }}>正在检查登录状态…</main>;
   if (!auth.identity) return <LoginScreen onLogin={auth.signIn} error={auth.error} />;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -1829,6 +1829,7 @@ export default function App() {
     });
     setError(null);
     setIntakeChatWarning(null);
+    void cancelActiveJob().catch((cancelError) => setError(getErrorMessage(cancelError)));
   }
 
   async function runDeepReview() {
