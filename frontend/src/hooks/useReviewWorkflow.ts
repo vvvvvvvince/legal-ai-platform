@@ -9,6 +9,7 @@ import {
   type ReviewJob,
 } from "../api/reviewJobs";
 import type { ContractOverviewResponse, DeepReviewFormSettings } from "../domain/reviewTypes";
+import { describeSourceDocxFailure } from "../reviewUtils";
 
 const STORAGE_KEY = "legal-ai-review-job";
 
@@ -50,16 +51,17 @@ export function useReviewWorkflow() {
       filename: overview.filename,
       idempotency_key: idempotencyKey,
     }));
+    let sourceDocxWarning: string | null = null;
     if (sourceFile && sourceFile.name.toLowerCase().endsWith(".docx")) {
       try {
         await uploadReviewJobSourceDocx(queued.job_id, sourceFile);
-      } catch {
-        // Source docx persistence is best-effort; review results still work from contract_text.
+      } catch (uploadError) {
+        sourceDocxWarning = describeSourceDocxFailure(uploadError instanceof Error ? uploadError.message : null);
       }
     }
     const completed = await waitForReviewJob(queued.job_id, { onUpdate: setActiveJob });
     window.localStorage.removeItem(STORAGE_KEY);
-    return completed;
+    return { job: completed, sourceDocxWarning };
   }, []);
 
   const cancelActiveJob = useCallback(async () => {

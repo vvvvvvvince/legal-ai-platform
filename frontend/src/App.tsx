@@ -7,6 +7,7 @@ import { TextStyle } from "@tiptap/extension-text-style";
 import Underline from "@tiptap/extension-underline";
 import { ChangeEvent, FormEvent, type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import {
+  applySavedModifications,
   getParagraphMatchScore,
   isMissingClause,
   MISSING_SENTINEL
@@ -812,17 +813,6 @@ function downloadBlob(blob: Blob, filename: string) {
   link.click();
   link.remove();
   URL.revokeObjectURL(url);
-}
-
-function applySavedModifications(sourceText: string, mods: Modification[]) {
-  let text = sourceText;
-  for (const modification of mods) {
-    if (!modification.original || isMissingClause(modification.original)) continue;
-    const index = text.indexOf(modification.original);
-    if (index < 0) continue;
-    text = `${text.slice(0, index)}${modification.modified}${text.slice(index + modification.original.length)}`;
-  }
-  return text;
 }
 
 export default function App() {
@@ -1966,24 +1956,33 @@ export default function App() {
         actor_display_name: item.actor_display_name,
       }));
       let recoveredFile: File | null = null;
+      let sourceFileWarning = "";
       if (job.has_source_docx) {
-        recoveredFile = await downloadReviewJobSourceDocx(jobId, filename);
+        try {
+          recoveredFile = await downloadReviewJobSourceDocx(jobId, filename);
+        } catch (downloadError) {
+          sourceFileWarning = ` ${getErrorMessage(downloadError)}`;
+        }
+      } else if (filename.toLowerCase().endsWith(".docx")) {
+        sourceFileWarning = " 该记录没有保存 Word 原件，导出审阅版前请重新上传。";
       }
+      const restored = applySavedModifications(baseText, remoteMods);
       if (workflowEpochRef.current !== workflowEpoch) return;
       selectJob(job);
       setFile(recoveredFile);
+      pendingRevisionHtmlRef.current = restored.revisionHtml;
       setReview({ ...result, contract_text: baseText, manual_review_required: true });
       setContractOverview(null);
       setModifications(remoteMods);
-      setEditorText(remoteMods.length ? applySavedModifications(baseText, remoteMods) : baseText);
+      setEditorText(restored.correctedText);
       setReviewStage("modification");
       setShowReviewRecords(false);
       setIsSidebarCollapsed(false);
-      setEditorNotice(
-        remoteMods.length
-          ? `已恢复共享审查记录，并载入 ${remoteMods.length} 条已保存修改。`
-          : "已恢复共享审查记录，可继续处理右侧建议。"
-      );
+      const restoreNote = restored.appliedCount
+        ? `已恢复共享审查记录，并还原 ${restored.appliedCount} 处修订痕迹。`
+        : "已恢复共享审查记录，可继续处理右侧建议。";
+      const skipNote = restored.skippedCount ? ` 另有 ${restored.skippedCount} 处无法唯一定位，已保留在右侧。` : "";
+      setEditorNotice(`${restoreNote}${skipNote}${sourceFileWarning}`);
     } catch (recoveryError) {
       if (workflowEpochRef.current !== workflowEpoch) return;
       setError(getErrorMessage(recoveryError));
@@ -2012,7 +2011,7 @@ export default function App() {
     setError(null);
     try {
       setEditorNotice("深度审查任务已排队，系统会持续查询执行结果…");
-      const completedJob = await submitDeepReview(contractOverview, settingsForReview, file);
+      const { job: completedJob, sourceDocxWarning } = await submitDeepReview(contractOverview, settingsForReview, file);
       if (completedJob.status === "failed") {
         throw new Error(completedJob.error ?? "深度审查任务执行失败，请重试。");
       }
@@ -2039,11 +2038,11 @@ export default function App() {
       }
       setEditorText(autoApplied.correctedText);
       setReviewStage("modification");
-      setEditorNotice(
-        autoApplied.modifications.length
-          ? `综合审查已完成；已自动定位并写入 ${autoApplied.modifications.length} 处可精确匹配的修改。右侧可逐项撤销；未唯一定位的建议保留为人工确认。`
-          : "综合审查已完成。未发现可唯一定位的自动修改；请在右侧确认候选段落后再处理建议。"
-      );
+      const reviewNote = autoApplied.modifications.length
+        ? `综合审查已完成；已自动定位并写入 ${autoApplied.modifications.length} 处可精确匹配的修改。右侧可逐项撤销；未唯一定位的建议保留为人工确认。`
+        : "综合审查已完成。未发现可唯一定位的自动修改；请在右侧确认候选段落后再处理建议。";
+      setEditorNotice(sourceDocxWarning ? `${reviewNote} ${sourceDocxWarning}` : reviewNote);
+      if (sourceDocxWarning) setError(sourceDocxWarning);
     } catch (reviewError) {
       if (workflowEpochRef.current !== workflowEpoch) return;
       setError(getErrorMessage(reviewError));

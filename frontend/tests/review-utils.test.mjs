@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  applySavedModifications,
+  describeSourceDocxFailure,
   editDistance,
   extractHeadingCandidate,
   findFuzzyMatch,
@@ -67,4 +69,39 @@ test("isMissingClause recognizes sentinel variations", () => {
   assert.equal(isMissingClause(MISSING_SENTINEL), true);
   assert.equal(isMissingClause("缺失该约定"), true);
   assert.equal(isMissingClause("Counterparts"), false);
+});
+
+test("applySavedModifications restores replacement revision marks", () => {
+  const restored = applySavedModifications(
+    "甲方应按期付款。\n乙方应按期交货。",
+    [{ original: "按期付款", modified: "验收后付款", revision_id: "m1", paragraph_context: "甲方应按期付款。" }],
+  );
+  assert.equal(restored.correctedText, "甲方应验收后付款。\n乙方应按期交货。");
+  assert.match(restored.revisionHtml, /<del class="del-mark" data-revision-id="m1">按期付款<\/del>/);
+  assert.match(restored.revisionHtml, /<ins class="ins-mark" data-revision-id="m1">验收后付款<\/ins>/);
+  assert.equal(restored.appliedCount, 1);
+  assert.equal(restored.skippedCount, 0);
+});
+
+test("applySavedModifications inserts missing clauses after the saved anchor", () => {
+  const restored = applySavedModifications(
+    "第一条 付款。\n第二条 交付。",
+    [{ original: MISSING_SENTINEL, modified: "第三条 保密。", insert_after_text: "第一条 付款。" }],
+  );
+  assert.equal(restored.correctedText, "第一条 付款。\n第三条 保密。\n第二条 交付。");
+  assert.match(restored.revisionHtml, /<ins class="ins-mark"[^>]*>第三条 保密。<\/ins>/);
+});
+
+test("applySavedModifications skips ambiguous replacements", () => {
+  const restored = applySavedModifications(
+    "按期付款。\n按期付款。",
+    [{ original: "按期付款", modified: "验收后付款" }],
+  );
+  assert.equal(restored.correctedText, "按期付款。\n按期付款。");
+  assert.equal(restored.skippedCount, 1);
+  assert.equal(restored.appliedCount, 0);
+});
+
+test("describeSourceDocxFailure keeps the shared-export consequence visible", () => {
+  assert.match(describeSourceDocxFailure("网络中断"), /原始 Word 未能保存到共享工作区（网络中断）/);
 });
