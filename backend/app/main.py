@@ -428,6 +428,15 @@ async def cancel_review_job(
     return _job_summary(job)
 
 
+@app.get("/api/review-jobs")
+async def list_review_jobs(
+    x_api_token: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> list[dict[str, object]]:
+    identity = require_request_identity(x_api_token, x_tenant_id)
+    return [_job_summary(job) for job in _review_job_store().list_jobs(identity.workspace_id)]
+
+
 @app.get("/api/review-jobs/{job_id}")
 async def get_review_job(
     job_id: str,

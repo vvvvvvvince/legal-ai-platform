@@ -19,6 +19,17 @@ def test_store_creates_and_filters_by_tenant(tmp_path):
     assert store.get_job(job.job_id, "other") is None
 
 
+def test_list_jobs_only_returns_the_shared_workspace_jobs(tmp_path):
+    store = ReviewJobStore(tmp_path / "jobs.sqlite3")
+    own = store.create_job(tenant_id="shared", job_type="deep_review", request={"filename": "own.docx"})
+    store.create_job(tenant_id="other", job_type="deep_review", request={"filename": "other.docx"})
+
+    jobs = store.list_jobs("shared")
+
+    assert [job.job_id for job in jobs] == [own.job_id]
+    assert jobs[0].request["filename"] == "own.docx"
+
+
 def test_store_transitions_and_recovers_running_jobs(tmp_path):
     store = ReviewJobStore(tmp_path / "jobs.sqlite3")
     job = store.create_job(tenant_id="local", job_type="deep_review", request={})

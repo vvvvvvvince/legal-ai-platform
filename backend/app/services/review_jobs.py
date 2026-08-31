@@ -314,6 +314,15 @@ class ReviewJobStore:
             ).fetchone()
         return self._from_row(row)
 
+    def list_jobs(self, tenant_id: str, limit: int = 50) -> list[ReviewJob]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT * FROM review_jobs WHERE tenant_id = ?
+                   ORDER BY updated_at DESC LIMIT ?""",
+                (tenant_id, max(1, min(limit, 100))),
+            ).fetchall()
+        return [self._from_row(row) for row in rows]  # type: ignore[list-item]
+
     def save_modification(
         self,
         job_id: str,
