@@ -9,7 +9,7 @@ import {
   type ReviewJob,
 } from "../api/reviewJobs";
 import type { ContractOverviewResponse, DeepReviewFormSettings } from "../domain/reviewTypes";
-import { describeSourceDocxFailure } from "../reviewUtils";
+import { createIdempotencyKey, describeSourceDocxFailure } from "../reviewUtils";
 
 const STORAGE_KEY = "legal-ai-review-job";
 
@@ -38,7 +38,7 @@ export function useReviewWorkflow() {
     settings: DeepReviewFormSettings,
     sourceFile?: File | null,
   ) => {
-    const idempotencyKey = crypto.randomUUID();
+    const idempotencyKey = createIdempotencyKey();
     const queued = await createReviewJob({
       filename: overview.filename,
       contract_text: overview.contract_text,
