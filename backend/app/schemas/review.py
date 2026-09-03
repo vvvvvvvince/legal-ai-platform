@@ -262,6 +262,16 @@ class DeepReviewOutput(BaseModel):
     settings_note: str = ""
 
 
+class LocalReviewReference(BaseModel):
+    reference_type: Literal["approved_rule", "approved_sop", "historical_case"]
+    reference_id: str = ""
+    title: str = ""
+    source_file: str = ""
+    source_locator: str = ""
+    summary: str = ""
+    authority_note: str = ""
+
+
 class ReviewResponse(BaseModel):
     filename: str
     contract_type: str | None = Field(default=None, description="Detected enterprise contract type")
@@ -288,6 +298,10 @@ class ReviewResponse(BaseModel):
         default_factory=list,
         description="Deterministic basic quality and contract-framework checks run before detailed review",
     )
+    local_references: list[LocalReviewReference] = Field(
+        default_factory=list,
+        description="Read-only approved-rule and historical-case sources used by hybrid review",
+    )
     deep_review: DeepReviewOutput | None = None
 
 
@@ -297,3 +311,9 @@ class ReviewFeedback(BaseModel):
     decision: Literal["confirmed", "rejected", "edited"]
     note: str = ""
     corrected_suggestion: str | None = None
+    suggestion_id: str | None = None
+    human_comment: str = ""
+    final_revision: str = ""
+    project_exception: bool = False
+    eligible_for_personal_memory: bool = False
+    personal_memory_confirmed: bool = False

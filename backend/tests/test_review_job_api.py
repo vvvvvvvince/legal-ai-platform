@@ -59,11 +59,11 @@ def test_shared_workspace_modifications_keep_the_user_who_made_each_change(monke
     monkeypatch.setenv("REVIEW_JOB_DB", str(job_db))
     monkeypatch.setenv("REVIEW_JOB_WORKER_ENABLED", "false")
     auth = AuthStore(auth_db)
-    auth.create_user("alice", "甲同事", "correct-password")
-    auth.create_user("bob", "乙同事", "correct-password")
+    auth.create_user("alice", "甲同事", "correct-password", "13800000001")
+    auth.create_user("bob", "乙同事", "correct-password", "13800000002")
 
     with TestClient(app) as client:
-        assert client.post("/api/auth/login", json={"username": "alice", "password": "correct-password"}).status_code == 200
+        assert client.post("/api/auth/login", json={"username": "alice", "phone": "13800000001", "password": "correct-password"}).status_code == 200
         job = client.post("/api/review-jobs", json=_payload()).json()
         first = client.post(
             f"/api/review-jobs/{job['job_id']}/modifications",
@@ -73,7 +73,7 @@ def test_shared_workspace_modifications_keep_the_user_who_made_each_change(monke
         assert first.json()["actor_display_name"] == "甲同事"
 
         client.post("/api/auth/logout")
-        assert client.post("/api/auth/login", json={"username": "bob", "password": "correct-password"}).status_code == 200
+        assert client.post("/api/auth/login", json={"username": "bob", "phone": "13800000002", "password": "correct-password"}).status_code == 200
         shared = client.get(f"/api/review-jobs/{job['job_id']}/modifications")
         assert shared.status_code == 200
         assert shared.json()[0]["actor_display_name"] == "甲同事"
@@ -99,10 +99,10 @@ def test_list_review_jobs_returns_workspace_summaries(monkeypatch, tmp_path):
     monkeypatch.setenv("REVIEW_JOB_FILES_DIR", str(files_dir))
     monkeypatch.setenv("REVIEW_JOB_WORKER_ENABLED", "false")
     auth = AuthStore(auth_db)
-    auth.create_user("alice", "甲同事", "correct-password")
+    auth.create_user("alice", "甲同事", "correct-password", "13800000001")
 
     with TestClient(app) as client:
-        assert client.post("/api/auth/login", json={"username": "alice", "password": "correct-password"}).status_code == 200
+        assert client.post("/api/auth/login", json={"username": "alice", "phone": "13800000001", "password": "correct-password"}).status_code == 200
         job = client.post("/api/review-jobs", json=_payload()).json()
         listed = client.get("/api/review-jobs")
         assert listed.status_code == 200
@@ -123,11 +123,11 @@ def test_source_docx_round_trip(monkeypatch, tmp_path):
     monkeypatch.setenv("REVIEW_JOB_FILES_DIR", str(files_dir))
     monkeypatch.setenv("REVIEW_JOB_WORKER_ENABLED", "false")
     auth = AuthStore(auth_db)
-    auth.create_user("alice", "甲同事", "correct-password")
+    auth.create_user("alice", "甲同事", "correct-password", "13800000001")
     docx_bytes = b"PK\x03\x04fake-docx"
 
     with TestClient(app) as client:
-        assert client.post("/api/auth/login", json={"username": "alice", "password": "correct-password"}).status_code == 200
+        assert client.post("/api/auth/login", json={"username": "alice", "phone": "13800000001", "password": "correct-password"}).status_code == 200
         job = client.post("/api/review-jobs", json=_payload()).json()
         upload = client.put(
             f"/api/review-jobs/{job['job_id']}/source-docx",
@@ -148,18 +148,18 @@ def test_save_modification_reports_superseded_author(monkeypatch, tmp_path):
     monkeypatch.setenv("REVIEW_JOB_DB", str(job_db))
     monkeypatch.setenv("REVIEW_JOB_WORKER_ENABLED", "false")
     auth = AuthStore(auth_db)
-    auth.create_user("alice", "甲同事", "correct-password")
-    auth.create_user("bob", "乙同事", "correct-password")
+    auth.create_user("alice", "甲同事", "correct-password", "13800000001")
+    auth.create_user("bob", "乙同事", "correct-password", "13800000002")
 
     with TestClient(app) as client:
-        assert client.post("/api/auth/login", json={"username": "alice", "password": "correct-password"}).status_code == 200
+        assert client.post("/api/auth/login", json={"username": "alice", "phone": "13800000001", "password": "correct-password"}).status_code == 200
         job = client.post("/api/review-jobs", json=_payload()).json()
         client.post(
             f"/api/review-jobs/{job['job_id']}/modifications",
             json={"risk_key": "payment", "original": "先付款", "modified": "验收后付款"},
         )
         client.post("/api/auth/logout")
-        assert client.post("/api/auth/login", json={"username": "bob", "password": "correct-password"}).status_code == 200
+        assert client.post("/api/auth/login", json={"username": "bob", "phone": "13800000002", "password": "correct-password"}).status_code == 200
         replacement = client.post(
             f"/api/review-jobs/{job['job_id']}/modifications",
             json={"risk_key": "payment", "original": "先付款", "modified": "验收后 30 日付款"},

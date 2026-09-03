@@ -364,6 +364,18 @@ def continue_intake_chat(request: IntakeChatRequest) -> IntakeChatResponse:
             for question in _clean_quick_replies(payload.get("suggested_questions"))
             if question not in quick_replies
         ][:4]
+        # A model may legitimately skip quick replies when it does not ask a
+        # follow-up, but an incomplete intake should never leave the user with
+        # only a blank input box.  Reuse the deterministic step-aware options
+        # until the minimum review context is complete.
+        fallback = _fallback_turn(request)
+        if not ready and not quick_replies:
+            quick_replies = fallback.quick_replies
+        if not suggested_questions:
+            suggested_questions = [
+                question for question in fallback.suggested_questions
+                if question not in quick_replies
+            ][:4]
         return IntakeChatResponse(
             assistant_message=_clean_assistant_message(payload["assistant_message"]) or _fallback_turn(request).assistant_message,
             quick_replies=quick_replies,

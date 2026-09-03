@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   applySavedModifications,
+  createIdempotencyKey,
   describeSourceDocxFailure,
   editDistance,
   extractHeadingCandidate,
@@ -14,6 +15,30 @@ import {
   normalizeMatchText,
   stripClausePrefix
 } from "../.test-dist/reviewUtils.js";
+
+test("createIdempotencyKey uses randomUUID when available", () => {
+  assert.equal(createIdempotencyKey({ randomUUID: () => "uuid-from-browser" }), "uuid-from-browser");
+});
+
+test("createIdempotencyKey falls back to a UUID from getRandomValues", () => {
+  const key = createIdempotencyKey({
+    getRandomValues: (values) => {
+      values.fill(0);
+      return values;
+    },
+  });
+  assert.equal(key, "00000000-0000-4000-8000-000000000000");
+});
+
+test("createIdempotencyKey still returns a UUID without Web Crypto", () => {
+  const originalRandom = Math.random;
+  Math.random = () => 0.5;
+  try {
+    assert.equal(createIdempotencyKey({}), "80808080-8080-4080-8080-808080808080");
+  } finally {
+    Math.random = originalRandom;
+  }
+});
 
 test("editDistance computes small punctuation-safe distance", () => {
   assert.equal(editDistance("Taxes.", "Taxes"), 1);

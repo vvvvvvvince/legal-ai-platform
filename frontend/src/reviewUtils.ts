@@ -7,6 +7,52 @@ export type FuzzyMatch = {
 
 export const MISSING_SENTINEL = "【缺失该约定】";
 
+type CryptoSource = {
+  randomUUID?: () => string;
+  getRandomValues?: (values: Uint8Array) => Uint8Array;
+};
+
+function getBrowserCrypto(): CryptoSource | undefined {
+  return typeof globalThis !== "undefined" ? globalThis.crypto : undefined;
+}
+
+/**
+ * Generate an idempotency key even when Crypto.randomUUID is unavailable.
+ * randomUUID is restricted to secure contexts in some browsers, while
+ * getRandomValues remains available in more deployment environments.
+ */
+export function createIdempotencyKey(source: CryptoSource | undefined = getBrowserCrypto()): string {
+  if (source?.randomUUID) {
+    try {
+      return source.randomUUID();
+    } catch {
+      // Fall through to the getRandomValues-based UUID for insecure contexts.
+    }
+  }
+
+  const bytes = new Uint8Array(16);
+  let filledByCrypto = false;
+  if (source?.getRandomValues) {
+    try {
+      source.getRandomValues(bytes);
+      filledByCrypto = true;
+    } catch {
+      // Fall through to Math.random if getRandomValues is unavailable at runtime.
+    }
+  }
+  if (!filledByCrypto) {
+    // Math.random below is only an idempotency fallback, not a secret.
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256);
+    }
+  }
+
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 const clausePrefixPattern =
   /^\s*(?:section\s+|article\s+)?(?:\(?\d+\)?|\(?[a-zA-Z]\)|[ivxlcdmIVXLCDM]+[.)]?|\d+(?:\.\d+)*[.)]?)\s*[:.)-]*\s*/i;
 

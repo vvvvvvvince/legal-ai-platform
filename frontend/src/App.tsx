@@ -5,7 +5,7 @@ import Color from "@tiptap/extension-color";
 import Highlight from "@tiptap/extension-highlight";
 import { TextStyle } from "@tiptap/extension-text-style";
 import Underline from "@tiptap/extension-underline";
-import { ChangeEvent, FormEvent, type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, FormEvent, type CSSProperties, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   applySavedModifications,
   getParagraphMatchScore,
@@ -14,9 +14,11 @@ import {
 } from "./reviewUtils";
 import { useReviewWorkflow } from "./hooks/useReviewWorkflow";
 import { useAuth } from "./hooks/useAuth";
+import { addModelProfile, getCurrentModel, getModelConfig, getOperationLogs, updateModelConfig, type ModelConfig, type ModelProfileInput, type OperationLog } from "./api/authApi";
 import { apiHeaders, continueIntakeChat, continueLegalResearch, getContractOverview, isLegalResearchQuestion } from "./api/legalApi";
 import { downloadReviewJobSourceDocx, getReviewJob, listReviewModifications, revertReviewModification, saveReviewModification } from "./api/reviewJobs";
 import { normalizeReviewResponse } from "./domain/reviewTransforms";
+import { formatApiErrorDetail } from "./api/errorDetails";
 import { ReviewJobStatus } from "./features/review/ReviewJobStatus";
 import { ReviewRecordsPanel } from "./features/review/ReviewRecordsPanel";
 import { EditorPanel } from "./features/editor/EditorPanel";
@@ -39,21 +41,37 @@ const emptyIntakeCriteria: IntakeReviewCriteria = {
   additional_notes: []
 };
 
-function LoginScreen({ onLogin, error }: { onLogin: (username: string, password: string) => Promise<void>; error: string | null }) {
+// These are always available after a contract is read. They are intentionally
+// independent from a model reply so the user never loses review controls when
+// the model does not ask a follow-up question or returns a partial response.
+const standardReviewAngles = [
+  "价格与付款",
+  "交付与验收",
+  "责任与赔偿",
+  "保密与数据安全",
+  "知识产权",
+  "变更与解除",
+  "违约与救济",
+  "争议解决",
+];
+
+function LoginScreen({ onLogin, error }: { onLogin: (username: string, phone: string, password: string) => Promise<void>; error: string | null }) {
   const [username, setUsername] = useState("");
+  const [phone, setPhone] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   async function submit(event: FormEvent) {
     event.preventDefault();
     setBusy(true);
-    try { await onLogin(username, password); } finally { setBusy(false); }
+    try { await onLogin(username, phone, password); } finally { setBusy(false); }
   }
   return (
     <main style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: "#f7f8fa" }}>
       <form onSubmit={submit} style={{ width: "min(360px, calc(100vw - 40px))", padding: 28, borderRadius: 20, background: "white", boxShadow: "0 18px 50px rgba(15,23,42,.10)" }}>
         <h1 style={{ marginTop: 0 }}>AI 法务助手</h1>
-        <p style={{ color: "#64748b" }}>登录共享合同工作区</p>
+        <p style={{ color: "#64748b" }}>请输入已登记的用户名、手机号和密码；管理员可不填手机号。</p>
         <input aria-label="用户名" value={username} onChange={(event) => setUsername(event.target.value)} placeholder="用户名" autoComplete="username" style={{ width: "100%", boxSizing: "border-box", padding: "11px 12px", marginBottom: 10, border: "1px solid #d9dee7", borderRadius: 10 }} />
+        <input aria-label="手机号" value={phone} onChange={(event) => setPhone(event.target.value)} placeholder="手机号" autoComplete="tel" inputMode="tel" style={{ width: "100%", boxSizing: "border-box", padding: "11px 12px", marginBottom: 10, border: "1px solid #d9dee7", borderRadius: 10 }} />
         <input aria-label="密码" type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="密码" autoComplete="current-password" style={{ width: "100%", boxSizing: "border-box", padding: "11px 12px", marginBottom: 14, border: "1px solid #d9dee7", borderRadius: 10 }} />
         {error && <p role="alert" style={{ color: "#b42318", fontSize: 13 }}>{error}</p>}
         <button type="submit" disabled={busy || !username || !password} style={{ width: "100%", padding: "11px 12px", border: 0, borderRadius: 10, background: "#1f2937", color: "white", cursor: "pointer" }}>{busy ? "登录中…" : "登录"}</button>
@@ -244,6 +262,10 @@ function getErrorMessage(error: unknown) {
 
     if (error.message.includes("DASHSCOPE_API_KEY")) {
       return "百炼 API Key 未配置或未进入容器，请检查 backend/.env 后重启后端服务。";
+    }
+
+    if (normalizedMessage.includes("string should have at most 300 characters")) {
+      return "系统保存修改记录时的标识过长。请刷新页面后重新执行该项修改；合同正文与审查结果不会丢失。";
     }
 
     if (normalizedMessage.includes("could not be located exactly")) {
@@ -643,7 +665,20 @@ function findRiskLocationCandidates(text: string, risk: ReviewRisk): RiskLocatio
 }
 
 function getRiskKey(risk: ReviewRisk) {
-  return `${risk.item}\u0000${risk.original_text}\u0000${risk.suggestion}`;
+  // This key is sent to the shared modification API, where identifiers are
+  // deliberately bounded. Do not use the complete clause text as an ID: a
+  // single long clause can exceed that limit even though its content itself is
+  // valid and must still be saved in full in `original` and `modified`.
+  const source = `${risk.item}\u0000${risk.original_text}\u0000${risk.suggestion}`;
+  const hash = (seed: number, reverse = false) => {
+    let value = seed;
+    for (let index = 0; index < source.length; index += 1) {
+      const character = source.charCodeAt(reverse ? source.length - 1 - index : index);
+      value = Math.imul(value ^ character, 0x01000193);
+    }
+    return (value >>> 0).toString(36);
+  };
+  return `risk-${hash(0x811c9dc5)}-${hash(0x9e3779b9, true)}`;
 }
 
 function isRiskModification(modification: Modification, risk: ReviewRisk, riskKey: string) {
@@ -772,7 +807,7 @@ async function exportReviewedContract(file: File, modifications: Modification[],
 
   if (!response.ok) {
     const payload = await response.json().catch(() => null);
-    throw new Error(payload?.detail ?? `Export request failed with status ${response.status}.`);
+    throw new Error(formatApiErrorDetail(payload?.detail, `Export request failed with status ${response.status}.`));
   }
 
   return {
@@ -800,7 +835,7 @@ async function recordReviewFeedback(
   });
   if (!response.ok) {
     const payload = await response.json().catch(() => null);
-    throw new Error(payload?.detail ?? "复核反馈记录失败。");
+    throw new Error(formatApiErrorDetail(payload?.detail, "复核反馈记录失败。"));
   }
 }
 
@@ -871,11 +906,50 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
   const [isIntakeChatLoading, setIsIntakeChatLoading] = useState(false);
   const [intakeReadyForReview, setIntakeReadyForReview] = useState(false);
   const [intakeChatWarning, setIntakeChatWarning] = useState<string | null>(null);
+  const [focusSelectionNotice, setFocusSelectionNotice] = useState<string | null>(null);
   const [additionalNoteDraft, setAdditionalNoteDraft] = useState("");
   const [intakeConversationStep, setIntakeConversationStep] = useState<IntakeConversationStep>("role");
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [readerPanelHeight, setReaderPanelHeight] = useState<number | null>(null);
   const [showReviewRecords, setShowReviewRecords] = useState(false);
+  const [showOperationLogs, setShowOperationLogs] = useState(false);
+  const [operationLogs, setOperationLogs] = useState<OperationLog[]>([]);
+  const [operationLogError, setOperationLogError] = useState<string | null>(null);
+  const [showModelConfig, setShowModelConfig] = useState(false);
+  const [modelConfig, setModelConfig] = useState<ModelConfig | null>(null);
+  const [modelConfigError, setModelConfigError] = useState<string | null>(null);
+  const [isSavingModel, setIsSavingModel] = useState(false);
+  const [activeModel, setActiveModel] = useState("加载中…");
+  const [newModel, setNewModel] = useState<ModelProfileInput>({ display_name: "", model_id: "", base_url: "", api_key: "" });
+
+  const openOperationLogs = useCallback(async () => {
+    setShowOperationLogs(true);
+    setOperationLogError(null);
+    try {
+      setOperationLogs(await getOperationLogs());
+    } catch (reason) {
+      setOperationLogError(reason instanceof Error ? reason.message : "无法读取操作日志。");
+    }
+  }, []);
+  const openModelConfig = useCallback(async () => {
+    setShowModelConfig(true); setModelConfigError(null);
+    try { setModelConfig(await getModelConfig()); }
+    catch (reason) { setModelConfigError(reason instanceof Error ? reason.message : "无法读取模型配置。"); }
+  }, []);
+  const saveModelConfig = useCallback(async () => {
+    if (!modelConfig) return;
+    setIsSavingModel(true); setModelConfigError(null);
+    try { const next = await updateModelConfig(modelConfig.active_model); setModelConfig(next); setActiveModel(next.active_model); }
+    catch (reason) { setModelConfigError(reason instanceof Error ? reason.message : "模型切换失败。"); }
+    finally { setIsSavingModel(false); }
+  }, [modelConfig]);
+  const saveNewModel = useCallback(async () => {
+    setIsSavingModel(true); setModelConfigError(null);
+    try { const next = await addModelProfile(newModel); setModelConfig(next); setNewModel({ display_name: "", model_id: "", base_url: "", api_key: "" }); }
+    catch (reason) { setModelConfigError(reason instanceof Error ? reason.message : "新增模型失败。"); }
+    finally { setIsSavingModel(false); }
+  }, [newModel]);
+  useEffect(() => { void getCurrentModel().then(setActiveModel).catch(() => setActiveModel("暂不可用")); }, []);
   const [recoveringJobId, setRecoveringJobId] = useState<string | null>(null);
   const [modificationConflict, setModificationConflict] = useState<string | null>(null);
   const syncingEditorRef = useRef(false);
@@ -883,6 +957,14 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
   // intake and deep-review calls keep the session number they started with so
   // an older response can never overwrite a newer contract's workspace.
   const workflowEpochRef = useRef(0);
+
+  // Measure as soon as the document frame mounts. This gives the result pane
+  // a fixed height in its very first visible layout, rather than after a
+  // collapse/expand interaction or a later ResizeObserver callback.
+  const setReaderPanelNode = useCallback((node: HTMLElement | null) => {
+    readerPanelRef.current = node;
+    if (node) setReaderPanelHeight(Math.ceil(node.getBoundingClientRect().height));
+  }, []);
 
   useEffect(() => {
     if (reviewStage !== "modification" || !activeJob?.job_id) return;
@@ -976,7 +1058,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
   const quickFocusOptions = useMemo(() => {
     const recommended = intakeRecommendations?.focus ?? [];
     const selected = deepReviewSettings.focus_areas;
-    return Array.from(new Set([...recommended, ...selected, "价格与付款", "交付与验收", "责任与赔偿"])).slice(0, 4);
+    return Array.from(new Set([...recommended, ...selected, ...standardReviewAngles])).slice(0, 8);
   }, [deepReviewSettings.focus_areas, intakeRecommendations]);
   const intakeInstructionSummary = useMemo(() => {
     const parts = [
@@ -1050,7 +1132,10 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
     return () => cancelAnimationFrame(frame);
   }, [contractOverview, file, intakeMessages, intakeReadyForReview, isIntakeChatLoading, isLoading, review]);
 
-  useEffect(() => {
+  // Synchronize the right result frame with the left document frame before
+  // paint. This prevents a long result list from briefly stretching the page
+  // while the document editor or its export bar is being updated.
+  useLayoutEffect(() => {
     const panel = readerPanelRef.current;
     if (!panel || typeof ResizeObserver === "undefined") return;
 
@@ -1062,7 +1147,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
     observer.observe(panel);
     updateHeight();
     return () => observer.disconnect();
-  }, [review, editorNotice, error]);
+  }, [review, editorNotice, error, editorText, modifications.length]);
 
   function clearEditorHighlight() {
     if (highlightedParagraphRef.current) {
@@ -1712,6 +1797,16 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
       const next = selected.includes(option)
         ? selected.filter((item) => item !== option)
         : [...selected, option];
+      if (field === "focus_areas") {
+        const description = next.length
+          ? `已确认重点审核项：${next.join("、")}。后续对话与综合审查将优先核对这些内容。`
+          : "已取消全部重点审核项。后续将按基础合同审查范围进行。";
+        setFocusSelectionNotice(description);
+        // Keep the conversational payload in sync too.  This means the next
+        // AI reply can acknowledge the exact choices without requiring a
+        // separate submit action.
+        setIntakeCriteria((criteria) => ({ ...criteria, focus_areas: next }));
+      }
       setError(null);
       return { ...current, [field]: next };
     });
@@ -1838,7 +1933,22 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
       }].slice(-12);
       setIntakeMessages(nextMessages);
       setIntakeCriteria(response.criteria);
-      setDeepReviewSettings(criteriaToDeepReviewSettings(response.criteria, overview.overview));
+      // A user can select review angles directly in the chat. Keep those
+      // choices when the next model turn updates the conversational criteria.
+      setDeepReviewSettings((current) => {
+        const next = criteriaToDeepReviewSettings(response.criteria, overview.overview);
+        return {
+          ...next,
+          focus_areas: Array.from(new Set([
+            ...current.focus_areas.filter((item) => item !== "全部"),
+            ...next.focus_areas,
+          ])).slice(0, 8),
+          special_requirements: Array.from(new Set([
+            ...current.special_requirements,
+            ...next.special_requirements,
+          ])).slice(0, 8),
+        };
+      });
       setIntakeReadyForReview(response.ready_for_review);
       setIntakeChatWarning(response.warning ?? null);
       setError(null);
@@ -2226,6 +2336,46 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
           </article>
         ) : null}
 
+        {contractOverview ? (
+          <section className="legal-chat-review-angles" aria-label="常用审核角度">
+            <div className="legal-chat-review-angles-heading">
+              <div>
+                <span>常用审核角度</span>
+                <strong>选择需要优先核对的内容</strong>
+              </div>
+              <b>{deepReviewSettings.focus_areas.length ? `已选 ${deepReviewSettings.focus_areas.length} 项` : "可多选"}</b>
+            </div>
+            <p>这些选项始终可用；即使模型没有给出快捷建议，也可以直接选择。未选项目仍会进行基础合同审查。</p>
+            <div className="legal-chat-review-angle-options">
+              {quickFocusOptions.map((option) => {
+                const selected = deepReviewSettings.focus_areas.includes(option);
+                return (
+                  <button
+                    key={option}
+                    type="button"
+                    className={selected ? "legal-chat-review-angle-selected" : ""}
+                    aria-pressed={selected}
+                    disabled={isLoading || isIntakeChatLoading}
+                    onClick={() => toggleDeepSettingOption("focus_areas", option)}
+                  >
+                    {option}
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+        ) : null}
+
+        {focusSelectionNotice ? (
+          <article className="legal-chat-message legal-chat-message-assistant" aria-live="polite">
+            <LegalAssistantMark />
+            <div className="legal-chat-message-body">
+              <b>AI 法务助手</b>
+              <p>{focusSelectionNotice}</p>
+            </div>
+          </article>
+        ) : null}
+
         {intakeMessages.map((message, index) => {
           const isLatestMessage = index === intakeMessages.length - 1;
           const quickReplies = message.role === "assistant" && isLatestMessage && !isIntakeChatLoading
@@ -2293,7 +2443,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
             <p>{[
               intakeCriteria.party_role === "party_a" ? "我方为甲方/采购方" : intakeCriteria.party_role === "party_b" ? "我方为乙方/供应方" : intakeCriteria.party_role === "other" ? `我方角色：${intakeCriteria.other_party_role || "待补充"}` : "我方身份待确认",
               intakeCriteria.business_context && `业务目标：${intakeCriteria.business_context}`,
-              intakeCriteria.focus_areas.length && `重点：${intakeCriteria.focus_areas.join("、")}`,
+              deepReviewSettings.focus_areas.length && `重点：${deepReviewSettings.focus_areas.join("、")}`,
               intakeCriteria.non_negotiables && `底线：${intakeCriteria.non_negotiables}`,
             ].filter(Boolean).join("；")}</p>
             <small>这些信息只作为审查立场与谈判偏好，不会被视为合同中已经存在的约定。</small>
@@ -2319,6 +2469,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
         onDraftChange={setIntakeChatDraft}
         onSend={(event) => void sendIntakeChatMessage(event)}
         onStop={stopIntakeDraft}
+        activeModel={activeModel}
       />
     </section>
   );
@@ -2334,6 +2485,16 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          {auth.identity?.is_admin && (
+            <button className="secondary-button" type="button" onClick={() => void openModelConfig()}>
+              切换模型
+            </button>
+          )}
+          {auth.identity?.is_admin && (
+            <button className="secondary-button" type="button" onClick={() => void openOperationLogs()}>
+              用户操作日志
+            </button>
+          )}
           <button className="secondary-button" type="button" onClick={() => setShowReviewRecords(true)}>
             审查记录
           </button>
@@ -2350,6 +2511,39 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
         onRecover={(jobId) => void recoverReviewJob(jobId)}
         recoveringJobId={recoveringJobId}
       />
+      {showOperationLogs && (
+        <div role="dialog" aria-modal="true" aria-label="用户操作日志" style={{ position: "fixed", inset: 0, zIndex: 40, display: "grid", placeItems: "center", padding: 20, background: "rgba(15,23,42,.38)" }}>
+          <section style={{ width: "min(900px, 100%)", maxHeight: "min(78vh, 720px)", overflow: "auto", borderRadius: 16, padding: 24, background: "#fff", boxShadow: "0 20px 60px rgba(15,23,42,.22)" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16 }}>
+              <div><h2 style={{ margin: 0 }}>用户操作日志</h2><p style={{ margin: "6px 0 16px", color: "#64748b" }}>只记录操作元数据，不含密码、手机号和合同内容。</p></div>
+              <button className="secondary-button" type="button" onClick={() => setShowOperationLogs(false)}>关闭</button>
+            </div>
+            {operationLogError ? <p role="alert" style={{ color: "#b42318" }}>{operationLogError}</p> : (
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
+                <thead><tr style={{ textAlign: "left", color: "#475569" }}><th style={{ padding: 9 }}>时间</th><th style={{ padding: 9 }}>用户</th><th style={{ padding: 9 }}>操作</th><th style={{ padding: 9 }}>结果</th></tr></thead>
+                <tbody>{operationLogs.map((entry, index) => <tr key={`${entry.occurred_at}-${index}`} style={{ borderTop: "1px solid #e2e8f0" }}><td style={{ padding: 9 }}>{new Date(entry.occurred_at).toLocaleString()}</td><td style={{ padding: 9 }}>{entry.display_name}（{entry.username}）</td><td style={{ padding: 9 }}>{entry.action}</td><td style={{ padding: 9 }}>{entry.detail}</td></tr>)}</tbody>
+              </table>
+            )}
+          </section>
+        </div>
+      )}
+      {showModelConfig && (
+        <div role="dialog" aria-modal="true" aria-label="切换模型" style={{ position: "fixed", inset: 0, zIndex: 40, display: "grid", placeItems: "center", padding: 20, background: "rgba(15,23,42,.38)" }}>
+          <section style={{ width: "min(480px, 100%)", borderRadius: 16, padding: 24, background: "#fff", boxShadow: "0 20px 60px rgba(15,23,42,.22)" }}>
+            <h2 style={{ marginTop: 0 }}>切换大模型</h2>
+            <p style={{ color: "#64748b" }}>切换后，后续对话和新发起的审核会使用新模型；进行中的任务不受影响。</p>
+            {modelConfig ? <select aria-label="模型" value={modelConfig.active_model} onChange={(event) => setModelConfig({ ...modelConfig, active_model: event.target.value })} style={{ width: "100%", padding: "11px 12px", border: "1px solid #d9dee7", borderRadius: 10 }}>
+              {modelConfig.allowed_models.map((model) => <option key={model} value={model}>{model}</option>)}
+            </select> : <p>正在读取可用模型…</p>}
+            {modelConfigError ? <p role="alert" style={{ color: "#b42318" }}>{modelConfigError}</p> : null}
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 20 }}><button className="secondary-button" type="button" onClick={() => setShowModelConfig(false)}>取消</button><button className="primary-button" type="button" disabled={!modelConfig || isSavingModel} onClick={() => void saveModelConfig()}>{isSavingModel ? "保存中…" : "保存并切换"}</button></div>
+            <details style={{ marginTop: 22 }}><summary style={{ cursor: "pointer", fontWeight: 700 }}>新增自定义大模型</summary><p style={{ color: "#64748b", fontSize: 13 }}>API Key 仅保存到后端，普通用户无法查看。</p>
+              {([['display_name','显示名称，例如：内部模型'], ['model_id','模型 ID'], ['base_url','OpenAI 兼容接口地址'], ['api_key','API Key']] as const).map(([key, label]) => <input key={key} aria-label={label} type={key === 'api_key' ? 'password' : 'text'} placeholder={label} value={newModel[key]} onChange={(event) => setNewModel({ ...newModel, [key]: event.target.value })} style={{ display: "block", width: "100%", boxSizing: "border-box", padding: "10px 11px", marginTop: 9, border: "1px solid #d9dee7", borderRadius: 9 }} />)}
+              <button className="secondary-button" type="button" disabled={isSavingModel || !newModel.display_name || !newModel.model_id || !newModel.base_url || !newModel.api_key} onClick={() => void saveNewModel()} style={{ marginTop: 10 }}>{isSavingModel ? "保存中…" : "新增模型"}</button>
+            </details>
+          </section>
+        </div>
+      )}
       <div className={`workbench-shell${!review ? " workbench-shell-chat" : ""}`}>
         <div className="workbench-main">
           <input
@@ -2364,9 +2558,9 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
         <section
           className={`workspace robin-review-workspace${isSidebarCollapsed ? " workspace-collapsed" : ""}`}
           aria-busy={isLoading}
-          style={readerPanelHeight && !isSidebarCollapsed ? { "--review-panel-height": `${readerPanelHeight}px` } as CSSProperties : undefined}
+          style={!isSidebarCollapsed ? { "--review-panel-height": `${readerPanelHeight ?? 0}px` } as CSSProperties : undefined}
         >
-          <section className="reader-panel robin-document-panel" ref={readerPanelRef}>
+          <section className="reader-panel robin-document-panel" ref={setReaderPanelNode}>
             <div className="compact-document-bar">
               <div className="document-info">
                 <span className="document-icon" aria-hidden="true">
@@ -2816,7 +3010,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
                   </details>
                 ) : null}
 
-                <ReviewPanel deepReview={review.deep_review} reviewStage={reviewStage} />
+                <ReviewPanel deepReview={review.deep_review} localReferences={review.local_references} reviewStage={reviewStage} />
               </div>
             </section>
           </aside>

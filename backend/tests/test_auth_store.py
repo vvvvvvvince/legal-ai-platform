@@ -5,15 +5,22 @@ from app.services.auth_store import AuthStore
 
 def test_password_hash_only_authenticates_original_password(tmp_path):
     store = AuthStore(tmp_path / "auth.sqlite3")
-    user = store.create_user("alice", "Alice", "correct-password")
+    user = store.create_user("alice", "Alice", "correct-password", "13800000001")
 
-    assert store.authenticate("alice", "correct-password").user_id == user.user_id
-    assert store.authenticate("alice", "wrong-password") is None
+    assert store.authenticate("alice", "13800000001", "correct-password").user_id == user.user_id
+    assert store.authenticate("alice", "13800000001", "wrong-password") is None
+
+
+def test_invalid_phone_is_a_failed_login_not_a_server_error(tmp_path):
+    store = AuthStore(tmp_path / "auth.sqlite3")
+    store.create_user("alice", "Alice", "correct-password", "13800000001")
+
+    assert store.authenticate("alice", "not-a-phone", "correct-password") is None
 
 
 def test_session_round_trip_returns_shared_workspace_identity(tmp_path):
     store = AuthStore(tmp_path / "auth.sqlite3")
-    user = store.create_user("alice", "Alice", "secret-123")
+    user = store.create_user("alice", "Alice", "secret-123", "13800000001")
     token = store.create_session(user.user_id, 3600)
 
     assert store.get_identity(token).workspace_id == "shared"
@@ -34,7 +41,7 @@ def test_login_failures_are_rate_limited_and_success_can_clear_them(tmp_path):
 def test_session_cleanup_removes_expired_and_revoked_rows(tmp_path):
     path = tmp_path / "auth.sqlite3"
     store = AuthStore(path)
-    user = store.create_user("alice", "Alice", "secret-123")
+    user = store.create_user("alice", "Alice", "secret-123", "13800000001")
     expired = store.create_session(user.user_id, 3600)
     revoked = store.create_session(user.user_id, 3600)
     store.revoke_session(revoked)

@@ -1,6 +1,7 @@
 import os
 import json
 import secrets
+import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,10 +52,13 @@ from app.services.request_auth import (
 )
 from app.services.review_job_files import has_source_docx, read_source_docx, save_source_docx
 from app.services.review_jobs import IdempotencyConflict, ModificationSaveResult, ReviewJob, ReviewJobStore, ReviewJobWorker, ReviewModification
+from app.services.local_review_memory import local_review_context
 
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 API_VERSION = "2026.08.18-chat-intake"
 DEFAULT_REVIEW_JOB_DB = "data/review_jobs.sqlite3"
+DEFAULT_PROVIDER_BASE_URL = os.getenv("BAILIAN_BASE_URL")
+DEFAULT_PROVIDER_API_KEY = os.getenv("DASHSCOPE_API_KEY")
 MAX_KNOWLEDGE_SNAPSHOT_BYTES = int(
     os.getenv("MAX_KNOWLEDGE_SNAPSHOT_BYTES", str(250 * 1024 * 1024))
 )
@@ -73,13 +77,97 @@ PDF_QUALITY_NOTES = {
 
 class LoginRequest(BaseModel):
     username: str
+    phone: str = ""
     password: str
+
+
+class ModelConfigRequest(BaseModel):
+    model: str
+
+
+class ModelProfileCreateRequest(BaseModel):
+    display_name: str
+    model_id: str
+    base_url: str
+    api_key: str
+
+
+def bootstrap_users_from_environment(auth: AuthStore) -> None:
+    """Create the first three accounts in a fresh production volume only.
+
+    The JSON is read only from the private runtime environment, never returned
+    by an API or written to logs.  Once users exist, the value is ignored.
+    """
+    raw = os.getenv("AUTH_BOOTSTRAP_USERS_JSON", "").strip()
+    if auth.has_active_users() or not raw:
+        return
+    try:
+        entries = json.loads(raw)
+        users = [
+            (entry["username"], entry["display_name"], entry.get("phone"), entry["password"], bool(entry.get("is_admin")))
+            for entry in entries
+        ]
+        auth.replace_active_users(users)
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("AUTH_BOOTSTRAP_USERS_JSON is invalid; production startup is blocked.") from exc
+
+
+def model_profiles() -> dict[str, dict[str, str]]:
+    """Named non-default providers; values stay server-side and are never returned."""
+    base_url = os.getenv("QWEN3_8_27B_BASE_URL", "").strip()
+    api_key = os.getenv("QWEN3_8_27B_API_KEY", "").strip()
+    profiles = {"Qwen3.8-27B": {"base_url": base_url, "api_key": api_key}} if base_url and api_key else {}
+    stored = AuthStore(auth_db_path()).get_setting("custom_model_profiles")
+    try:
+        custom_profiles = json.loads(stored) if stored else []
+    except json.JSONDecodeError:
+        custom_profiles = []
+    if isinstance(custom_profiles, list):
+        for item in custom_profiles:
+            if not isinstance(item, dict):
+                continue
+            model_id, custom_url, custom_key = item.get("model_id"), item.get("base_url"), item.get("api_key")
+            if all(isinstance(value, str) and value for value in (model_id, custom_url, custom_key)):
+                profiles[model_id] = {"base_url": custom_url, "api_key": custom_key}
+    return profiles
+
+
+def allowed_models() -> list[str]:
+    return ["qwen3.7-flash", *model_profiles().keys()]
+
+
+def session_cookie_secure() -> bool:
+    """Default to secure cookies in production, with an explicit local override."""
+    explicit = os.getenv("SESSION_COOKIE_SECURE", "").strip().lower()
+    if explicit in {"1", "true", "yes", "on"}:
+        return True
+    if explicit in {"0", "false", "no", "off"}:
+        return False
+    return os.getenv("APP_ENV", "development").lower() in {"production", "prod"}
+
+
+def activate_model(model: str) -> None:
+    profile = model_profiles().get(model)
+    if profile:
+        os.environ["BAILIAN_BASE_URL"] = profile["base_url"]
+        os.environ["DASHSCOPE_API_KEY"] = profile["api_key"]
+    else:
+        if DEFAULT_PROVIDER_BASE_URL:
+            os.environ["BAILIAN_BASE_URL"] = DEFAULT_PROVIDER_BASE_URL
+        if DEFAULT_PROVIDER_API_KEY:
+            os.environ["DASHSCOPE_API_KEY"] = DEFAULT_PROVIDER_API_KEY
+    os.environ["BAILIAN_MODEL"] = model
 
 
 @asynccontextmanager
 async def review_job_lifespan(application: FastAPI):
     auth = AuthStore(auth_db_path())
+    bootstrap_users_from_environment(auth)
+    saved_model = auth.get_setting("active_chat_model")
+    if saved_model:
+        activate_model(saved_model)
     auth.cleanup_sessions()
+    auth.cleanup_operation_logs()
     if os.getenv("APP_ENV", "development").lower() in {"production", "prod"} and not auth.has_active_users():
         raise RuntimeError("No active users configured; run scripts/bootstrap_users.py before production startup.")
     store = _review_job_store()
@@ -140,7 +228,12 @@ async def attach_request_identity(request: Request, call_next):
         return JSONResponse({"detail": "请先登录。"}, status_code=status.HTTP_401_UNAUTHORIZED)
     token = set_current_identity(identity)
     try:
-        return await call_next(request)
+        response = await call_next(request)
+        # Read/poll requests are frequent during a long review.  Recording
+        # every one floods the audit log and adds avoidable SQLite contention.
+        if identity is not None and request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.url.path.startswith("/api/"):
+            store.log_operation(identity, f"{request.method} {request.url.path}", f"HTTP {response.status_code}")
+        return response
     finally:
         reset_current_identity(token)
 
@@ -226,17 +319,19 @@ def _modification_summary(
     return summary
 
 
-def _identity_payload(identity: RequestIdentity) -> dict[str, str]:
+def _identity_payload(identity: RequestIdentity) -> dict[str, object]:
     return {
         "user_id": identity.user_id,
         "username": identity.username,
+        "phone": identity.phone,
         "display_name": identity.display_name,
         "workspace_id": identity.workspace_id,
+        "is_admin": identity.is_admin,
     }
 
 
 @app.post("/api/auth/login")
-def login(payload: LoginRequest, request: Request, response: Response) -> dict[str, str]:
+def login(payload: LoginRequest, request: Request, response: Response) -> dict[str, object]:
     store = AuthStore(auth_db_path())
     client_key = request.client.host if request.client else "unknown"
     max_attempts = max(1, int(os.getenv("LOGIN_MAX_ATTEMPTS", "5")))
@@ -248,28 +343,28 @@ def login(payload: LoginRequest, request: Request, response: Response) -> dict[s
         window_seconds=window_seconds,
     ):
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="登录尝试过多，请稍后再试。")
-    identity = store.authenticate(payload.username, payload.password)
+    identity = store.authenticate(payload.username, payload.phone, payload.password)
     if identity is None:
         store.record_login_failure(payload.username, client_key, window_seconds=window_seconds)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户名或密码错误。")
     store.clear_login_failures(payload.username, client_key)
     lifetime = max(300, int(os.getenv("SESSION_LIFETIME_SECONDS", str(8 * 3600))))
     token = store.create_session(identity.user_id, lifetime)
+    store.log_operation(identity, "登录", "登录成功")
     response.set_cookie(
         SESSION_COOKIE_NAME,
         token,
         max_age=lifetime,
         httponly=True,
         samesite="lax",
-        secure=os.getenv("APP_ENV", "development").lower() in {"production", "prod"}
-        or os.getenv("SESSION_COOKIE_SECURE", "false").lower() in {"1", "true", "yes"},
+        secure=session_cookie_secure(),
         path="/",
     )
     return _identity_payload(RequestIdentity.from_user(identity))
 
 
 @app.get("/api/auth/session")
-def current_session(request: Request) -> dict[str, str]:
+def current_session(request: Request) -> dict[str, object]:
     identity = identity_from_cookie(request.cookies.get(SESSION_COOKIE_NAME))
     if identity is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="请先登录。")
@@ -279,9 +374,80 @@ def current_session(request: Request) -> dict[str, str]:
 @app.post("/api/auth/logout")
 def logout(request: Request, response: Response) -> dict[str, str]:
     store = AuthStore(auth_db_path())
+    identity = store.get_identity(request.cookies.get(SESSION_COOKIE_NAME))
+    if identity:
+        store.log_operation(identity, "退出登录", "用户主动退出")
     store.revoke_session(request.cookies.get(SESSION_COOKIE_NAME))
     response.delete_cookie(SESSION_COOKIE_NAME, path="/")
     return {"status": "ok"}
+
+
+@app.get("/api/admin/operation-logs")
+def operation_logs(limit: int = 200) -> list[dict[str, str]]:
+    identity = require_request_identity()
+    if not identity.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅管理员可查看操作日志。")
+    return AuthStore(auth_db_path()).list_operation_logs(limit)
+
+
+@app.get("/api/admin/model-config")
+def get_model_config() -> dict[str, object]:
+    identity = require_request_identity()
+    if not identity.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅管理员可查看模型配置。")
+    active = os.getenv("BAILIAN_MODEL", "qwen-max")
+    return {"active_model": active, "allowed_models": allowed_models()}
+
+
+@app.get("/api/model")
+def current_model() -> dict[str, str]:
+    require_request_identity()
+    return {"active_model": os.getenv("BAILIAN_MODEL", "qwen-max")}
+
+
+@app.put("/api/admin/model-config")
+def update_model_config(payload: ModelConfigRequest) -> dict[str, object]:
+    identity = require_request_identity()
+    if not identity.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅管理员可切换模型。")
+    model = payload.model.strip()
+    if model not in allowed_models() or not re.fullmatch(r"[A-Za-z0-9._:-]{1,120}", model):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="模型不在允许的切换列表中。")
+    AuthStore(auth_db_path()).set_setting("active_chat_model", model)
+    activate_model(model)
+    AuthStore(auth_db_path()).log_operation(identity, "切换大模型", f"已切换为 {model}")
+    return {"active_model": model, "allowed_models": allowed_models()}
+
+
+@app.post("/api/admin/model-config/profiles")
+def add_model_profile(payload: ModelProfileCreateRequest) -> dict[str, object]:
+    identity = require_request_identity()
+    if not identity.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅管理员可新增模型。")
+    display_name = payload.display_name.strip()
+    model_id = payload.model_id.strip()
+    base_url = payload.base_url.strip().rstrip("/")
+    api_key = payload.api_key.strip()
+    parsed_url = urlparse(base_url)
+    if not display_name or len(display_name) > 80 or not re.fullmatch(r"[A-Za-z0-9._:-]{1,120}", model_id):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="模型名称或模型 ID 格式不正确。")
+    if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc or parsed_url.username or parsed_url.password:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="接口地址必须是完整的 http 或 https 地址。")
+    if len(api_key) < 8 or len(api_key) > 500:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="API Key 格式不正确。")
+    store = AuthStore(auth_db_path())
+    raw = store.get_setting("custom_model_profiles")
+    try:
+        profiles = json.loads(raw) if raw else []
+    except json.JSONDecodeError:
+        profiles = []
+    if not isinstance(profiles, list):
+        profiles = []
+    profiles = [item for item in profiles if isinstance(item, dict) and item.get("model_id") != model_id]
+    profiles.append({"display_name": display_name, "model_id": model_id, "base_url": base_url, "api_key": api_key})
+    store.set_setting("custom_model_profiles", json.dumps(profiles, ensure_ascii=False))
+    store.log_operation(identity, "新增大模型", f"已新增 {display_name}（{model_id}）")
+    return {"active_model": os.getenv("BAILIAN_MODEL", "qwen-max"), "allowed_models": allowed_models()}
 
 
 @app.get("/health")
@@ -854,4 +1020,39 @@ async def record_review_feedback(
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    # Keep human feedback separate from approved rules and SOP material. A
+    # personal-memory record is created only after an explicit second flag;
+    # neither path can update approved_rules.jsonl.
+    feedback_dir = Path(os.getenv("HUMAN_FEEDBACK_DIR", str(Path(__file__).resolve().parents[3] / "data" / "human_feedback")))
+    feedback_dir.mkdir(parents=True, exist_ok=True)
+    feedback_path = feedback_dir / "feedback.jsonl"
+    with feedback_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    if feedback.eligible_for_personal_memory and feedback.personal_memory_confirmed:
+        personal_memory_path = feedback_dir / "personal_memory.jsonl"
+        with personal_memory_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({**record, "memory_scope": "personal_only"}, ensure_ascii=False) + "\n")
     return {"status": "recorded"}
+
+
+@app.get("/api/review/history")
+async def get_local_review_history(
+    case_id: str | None = None,
+    suggestion_id: str | None = None,
+    x_api_token: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> dict[str, object]:
+    """Expose only local, traceable history metadata for human review."""
+    require_request_identity(x_api_token, x_tenant_id)
+    query = (case_id or suggestion_id or "").strip()
+    if not query:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="case_id or suggestion_id is required.")
+    context = await run_in_threadpool(local_review_context, query, limit=8)
+    matches = [case for case in context["historical_cases"] if case["case_id"] == query]
+    if not matches and case_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Historical case not found.")
+    return {
+        "query": query,
+        "historical_cases": matches or context["historical_cases"],
+        "notice": "历史案例仅反映过往审核习惯，须由人工确认，不构成正式公司规则。",
+    }

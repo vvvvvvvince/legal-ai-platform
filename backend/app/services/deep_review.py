@@ -9,7 +9,7 @@ from time import perf_counter
 from fastapi import HTTPException, status
 from openai import OpenAI
 
-from app.schemas.review import DeepReviewOutput, DeepReviewSettings, ReviewCoverage, ReviewResponse
+from app.schemas.review import DeepReviewOutput, DeepReviewSettings, LocalReviewReference, ReviewCoverage, ReviewResponse
 from app.services.openai_review import (
     BAILIAN_DEFAULT_BASE_URL,
     BAILIAN_DEFAULT_MODEL,
@@ -28,6 +28,7 @@ from app.services.openai_review import (
 )
 from app.services.openai_review import MAX_CONTRACT_CHARS
 from app.services.document_preflight import PREFLIGHT_SCOPE, run_document_preflight
+from app.services.local_review_memory import format_local_context_for_model, local_review_context
 
 
 DEEP_REVIEW_PROMPT = """你是企业法务的深度合同审核助手。适用中国法律；你的结论仅供内部法务初审，重大、涉外、跨境数据、医疗健康数据、监管敏感或高争议金额事项必须标注人工复核。
@@ -44,6 +45,7 @@ DEEP_REVIEW_PROMPT = """你是企业法务的深度合同审核助手。适用�
 5. focus_areas 和 special_requirements 是用户明确关切，但未列出的项目仍须做完整基础审查；
 6. business_context 为空时，不得假设业务事实、预算、交付日期或数据类型。可按该角色的通用保护标准审查，并在 settings_note 中写明“系统默认审查假设”，将真正影响结论的未知事项列入 clarification_questions；
 7. 合同概览、前端推荐或通用标准不是用户已确认事实，不得把它们写成合同事实或不可让步底线。
+8. 下方可能提供本地审核依据：仅“正式规则”可作为强制要求；“历史审核习惯参考”只能解释过往处理方式，绝不能自动成为公司规则或替代人工判断。不得输出“批准签署”或等同结论。
 
 重点识别并按高风险优先级处理：单方变更、单方调价、预付款超过30%或付款未挂钩交付验收发票、验收标准缺失/默示验收/期限不足10个工作日、数据删除或AI训练/再识别/商业化/跨境、责任上限过低或数据/保密/IP/故意重大过失免责、无条件停服/限制账号、畸高退出成本、经营风险伪装不可抗力、对方所在地专属管辖、未经许可品牌宣传、合规与数据安全缺失。
 
@@ -95,6 +97,7 @@ def review_contract_deeply(
             base_url=os.getenv("BAILIAN_BASE_URL", BAILIAN_DEFAULT_BASE_URL),
             timeout=float(os.getenv("BAILIAN_DEEP_REVIEW_TIMEOUT_SECONDS", "180")),
         )
+        local_context = local_review_context(contract_text)
         response = client.chat.completions.create(
             model=os.getenv("BAILIAN_MODEL", BAILIAN_DEFAULT_MODEL),
             messages=[
@@ -103,6 +106,7 @@ def review_contract_deeply(
                     "role": "user",
                     "content": (
                         "深度审查设置：\n" + json.dumps(settings.model_dump(), ensure_ascii=False)
+                        + "\n\n" + format_local_context_for_model(local_context)
                         + "\n\n合同正文（段落编号仅用于定位，不属于合同内容）：\n" + _trim_contract_text(indexed_contract)
                     ),
                 },
@@ -155,6 +159,41 @@ def review_contract_deeply(
         # draft-quality checks here rather than making users complete a
         # separate review stage before stating their commercial objective.
         review.preflight_checks = run_document_preflight(contract_text)
+        review.local_references = [
+            *[
+                LocalReviewReference(
+                    reference_type="approved_rule",
+                    reference_id=item["rule_id"],
+                    title=item["rule_name"],
+                    source_file=item["source_file"],
+                    summary=item["required_action"],
+                    authority_note="已批准的正式规则，优先于历史审核习惯。",
+                )
+                for item in local_context.get("approved_rules", [])
+            ],
+            *([
+                LocalReviewReference(
+                    reference_type="approved_sop",
+                    reference_id="SOP-1.0",
+                    title="商业合同审核 SOP 1.0",
+                    source_file=local_context["sop"]["source_file"],
+                    summary="已批准 SOP 已作为审核流程依据。",
+                    authority_note="已批准 SOP；历史案例不得与其冲突。",
+                )
+            ] if local_context.get("sop", {}).get("approved") else []),
+            *[
+                LocalReviewReference(
+                    reference_type="historical_case",
+                    reference_id=item["case_id"],
+                    title=item["section_title"],
+                    source_file=item["source_file"],
+                    source_locator=item["source_locator"],
+                    summary=item["comment"] or item["revised_clause"][:300],
+                    authority_note="历史审核习惯参考，需人工确认，不是正式强制规则。",
+                )
+                for item in local_context.get("historical_cases", [])
+            ],
+        ]
         review.review_scope = [PREFLIGHT_SCOPE, "深度商业与谈判审查"]
         # The model's coverage is a commercial-review signal.  Add an explicit
         # completed entry for the deterministic draft-quality pass so progress

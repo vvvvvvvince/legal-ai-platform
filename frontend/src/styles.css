@@ -3860,7 +3860,9 @@ body,
 
   .editor-page-promoted {
     min-height: 0;
-    height: min(700px, calc(100dvh - 230px));
+    /* Use more of the visible screen: a taller reader also makes the native
+       scrollbar thumb easier to grab on long contracts. */
+    height: min(820px, calc(100dvh - 130px));
     flex: 0 0 auto;
     overflow-y: auto;
     overflow-x: hidden;
@@ -3869,6 +3871,99 @@ body,
   .contract-editor,
   .ProseMirror {
     min-height: 0;
+  }
+}
+
+/* A stable review-angle picker sits outside model-generated quick replies.
+   It keeps the pre-review path usable when a model turn has no follow-up. */
+#root .legal-chat-shell-openc .legal-chat-review-angles {
+  display: grid;
+  width: min(860px, calc(100% - 44px));
+  gap: 11px;
+  margin: 4px auto 14px;
+  padding: 15px 16px;
+  border: 1px solid #d9e3f2;
+  border-radius: 12px;
+  background: #f8fbff;
+}
+
+#root .legal-chat-shell-openc .legal-chat-review-angles-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+#root .legal-chat-shell-openc .legal-chat-review-angles-heading > div {
+  display: grid;
+  gap: 3px;
+}
+
+#root .legal-chat-shell-openc .legal-chat-review-angles-heading span {
+  color: #48627f;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+#root .legal-chat-shell-openc .legal-chat-review-angles-heading strong {
+  color: #183a61;
+  font-size: 0.92rem;
+}
+
+#root .legal-chat-shell-openc .legal-chat-review-angles-heading b {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  border-radius: 999px;
+  color: #175ea8;
+  background: #e7f1ff;
+  font-size: 0.72rem;
+}
+
+#root .legal-chat-shell-openc .legal-chat-review-angles > p {
+  margin: 0;
+  color: #5f7085;
+  font-size: 0.78rem;
+  line-height: 1.55;
+}
+
+#root .legal-chat-shell-openc .legal-chat-review-angle-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+#root .legal-chat-shell-openc .legal-chat-review-angle-options button {
+  padding: 7px 10px;
+  border: 1px solid #bfd0e5;
+  border-radius: 8px;
+  color: #334d6d;
+  background: #fff;
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+#root .legal-chat-shell-openc .legal-chat-review-angle-options button:hover:not(:disabled) {
+  border-color: #4c87c8;
+  color: #135fae;
+  background: #f0f7ff;
+}
+
+#root .legal-chat-shell-openc .legal-chat-review-angle-options .legal-chat-review-angle-selected {
+  border-color: #1c6fc3;
+  color: #fff;
+  background: #1c6fc3;
+}
+
+#root .legal-chat-shell-openc .legal-chat-review-angle-options button:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+@media (max-width: 640px) {
+  #root .legal-chat-shell-openc .legal-chat-review-angles {
+    width: calc(100% - 28px);
+    padding: 13px;
   }
 }
 
@@ -6191,10 +6286,27 @@ body {
 }
 
 .legal-chat-composer-actions {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 10px;
+}
+
+.legal-chat-composer-corner-actions {
+  grid-column: 3;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.legal-chat-active-model {
+  overflow: hidden;
+  color: #64748b;
+  font-size: 12px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 #root .legal-chat-shell-openc .legal-chat-composer-actions .legal-chat-attach {
@@ -6975,4 +7087,92 @@ body {
 #root .app-shell-chat .legal-chat-shell-empty .legal-chat-dock {
   align-self: stretch;
   padding-top: 8px;
+}
+
+/* The review workspace contains two independent scroll regions. Give both a
+   wider, longer thumb so long contracts are easier to drag through. */
+.editor-page-promoted,
+.review-sidebar .result-panel {
+  scrollbar-color: #8494a4 #edf1f5;
+  scrollbar-width: auto;
+}
+
+.editor-page-promoted::-webkit-scrollbar,
+.review-sidebar .result-panel::-webkit-scrollbar {
+  width: 16px;
+}
+
+.editor-page-promoted::-webkit-scrollbar-track,
+.review-sidebar .result-panel::-webkit-scrollbar-track {
+  background: #edf1f5;
+  border-radius: 999px;
+}
+
+.editor-page-promoted::-webkit-scrollbar-thumb,
+.review-sidebar .result-panel::-webkit-scrollbar-thumb {
+  min-height: 128px;
+  border: 4px solid #edf1f5;
+  border-radius: 999px;
+  background: #8494a4;
+}
+
+.editor-page-promoted::-webkit-scrollbar-thumb:hover,
+.review-sidebar .result-panel::-webkit-scrollbar-thumb:hover {
+  background: #607283;
+}
+
+/* Let the outer page end where the actual review workspace ends.  Long result
+   lists are handled by the independent scrollbar in the right result panel. */
+#root .app-shell-review {
+  display: block;
+  height: auto;
+  min-height: 0;
+  overflow: visible;
+}
+
+#root .app-shell-review .topbar {
+  flex: none;
+}
+
+#root .app-shell-review .workbench-shell {
+  height: auto;
+  min-height: 0;
+  flex: none;
+}
+
+#root .app-shell-review .workbench-main,
+#root .app-shell-review .robin-review-workspace {
+  height: auto;
+  min-height: 0;
+}
+
+/* The contract reader stays comfortably tall; the result panel on the right
+   retains its own scrollbar when its cards exceed this workspace. */
+@media (min-width: 981px) {
+  #root .app-shell-review .editor-page-promoted {
+    height: 820px;
+    min-height: 820px;
+    flex: 0 0 auto;
+  }
+
+  #root .app-shell-review .robin-review-sidebar {
+    height: var(--review-panel-height, auto);
+    max-height: var(--review-panel-height, none);
+    min-height: 0;
+    box-sizing: border-box;
+    overflow: hidden;
+  }
+
+  #root .app-shell-review .robin-review-sidebar .result-panel {
+    height: 100%;
+    max-height: 100%;
+    min-height: 0;
+    box-sizing: border-box;
+    /* Reserve a visible scrollbar. The cards stay within this frame instead
+       of changing the right column's height. */
+    overflow-y: scroll;
+    overflow-x: hidden;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+  }
 }

@@ -12,11 +12,12 @@ def main() -> None:
     for index in (1, 2):
         username = input(f"用户 {index} 登录名：").strip()
         display_name = input(f"用户 {index} 显示名：").strip()
+        phone = input(f"用户 {index} 手机号：").strip()
         password = getpass.getpass(f"用户 {index} 密码：")
         confirm = getpass.getpass("再次输入密码：")
         if password != confirm:
             raise SystemExit("两次密码不一致。")
-        store.create_user(username, display_name, password)
+        store.create_user(username, display_name, password, phone)
         print(f"已创建 {username}")
 
 

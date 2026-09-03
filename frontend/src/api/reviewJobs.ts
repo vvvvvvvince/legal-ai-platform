@@ -1,3 +1,5 @@
+import { formatApiErrorDetail } from "./errorDetails";
+
 export type ReviewJobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 
 export type ReviewJobRequest = {
@@ -167,8 +169,8 @@ export async function createReviewJob(request: unknown, idempotencyKey?: string)
     body: JSON.stringify(request),
   });
   if (!response.ok) {
-    const payload = await response.json().catch(() => null) as { detail?: string } | null;
-    throw new Error(payload?.detail ?? `审查任务创建失败（${response.status}）。`);
+    const payload = await response.json().catch(() => null) as { detail?: unknown } | null;
+    throw new Error(formatApiErrorDetail(payload?.detail, `审查任务创建失败（${response.status}）。`));
   }
   return normalizeReviewJob(await response.json());
 }
@@ -179,8 +181,8 @@ export async function cancelReviewJob(jobId: string): Promise<ReviewJob> {
     headers: apiHeaders(),
   });
   if (!response.ok) {
-    const payload = await response.json().catch(() => null) as { detail?: string } | null;
-    throw new Error(payload?.detail ?? `审查任务取消失败（${response.status}）。`);
+    const payload = await response.json().catch(() => null) as { detail?: unknown } | null;
+    throw new Error(formatApiErrorDetail(payload?.detail, `审查任务取消失败（${response.status}）。`));
   }
   return normalizeReviewJob(await response.json());
 }
@@ -188,8 +190,8 @@ export async function cancelReviewJob(jobId: string): Promise<ReviewJob> {
 export async function listReviewJobs(): Promise<ReviewJob[]> {
   const response = await fetch("/api/review-jobs", { headers: apiHeaders() });
   if (!response.ok) {
-    const payload = await response.json().catch(() => null) as { detail?: string } | null;
-    throw new Error(payload?.detail ?? "读取审查记录失败。");
+    const payload = await response.json().catch(() => null) as { detail?: unknown } | null;
+    throw new Error(formatApiErrorDetail(payload?.detail, "读取审查记录失败。"));
   }
   const payload = await response.json();
   if (!Array.isArray(payload)) throw new Error("审查记录返回了无法识别的数据。");
@@ -205,8 +207,8 @@ export async function uploadReviewJobSourceDocx(jobId: string, file: File): Prom
     body: formData,
   });
   if (!response.ok) {
-    const payload = await response.json().catch(() => null) as { detail?: string } | null;
-    throw new Error(payload?.detail ?? "保存原始合同失败。");
+    const payload = await response.json().catch(() => null) as { detail?: unknown } | null;
+    throw new Error(formatApiErrorDetail(payload?.detail, "保存原始合同失败。"));
   }
 }
 
@@ -215,8 +217,8 @@ export async function downloadReviewJobSourceDocx(jobId: string, filename: strin
     headers: apiHeaders(),
   });
   if (!response.ok) {
-    const payload = await response.json().catch(() => null) as { detail?: string } | null;
-    throw new Error(payload?.detail ?? "读取原始合同失败。");
+    const payload = await response.json().catch(() => null) as { detail?: unknown } | null;
+    throw new Error(formatApiErrorDetail(payload?.detail, "读取原始合同失败。"));
   }
   const blob = await response.blob();
   const safeName = filename.toLowerCase().endsWith(".docx") ? filename : `${filename.replace(/\.[^.]+$/, "")}.docx`;
@@ -228,16 +230,16 @@ export async function getReviewJob(jobId: string): Promise<ReviewJob> {
     headers: apiHeaders(),
   });
   if (!response.ok) {
-    const payload = await response.json().catch(() => null) as { detail?: string } | null;
-    throw new Error(payload?.detail ?? `审查任务查询失败（${response.status}）。`);
+    const payload = await response.json().catch(() => null) as { detail?: unknown } | null;
+    throw new Error(formatApiErrorDetail(payload?.detail, `审查任务查询失败（${response.status}）。`));
   }
   return normalizeReviewJob(await response.json());
 }
 
 async function readReviewModification(response: Response, fallback: string): Promise<ReviewModification> {
   if (!response.ok) {
-    const payload = await response.json().catch(() => null) as { detail?: string } | null;
-    throw new Error(payload?.detail ?? fallback);
+    const payload = await response.json().catch(() => null) as { detail?: unknown } | null;
+    throw new Error(formatApiErrorDetail(payload?.detail, fallback));
   }
   return normalizeReviewModification(await response.json());
 }
@@ -254,8 +256,8 @@ export async function saveReviewModification(jobId: string, modification: Review
 export async function listReviewModifications(jobId: string): Promise<ReviewModification[]> {
   const response = await fetch(`/api/review-jobs/${encodeURIComponent(jobId)}/modifications`, { headers: apiHeaders() });
   if (!response.ok) {
-    const payload = await response.json().catch(() => null) as { detail?: string } | null;
-    throw new Error(payload?.detail ?? "读取修改记录失败。");
+    const payload = await response.json().catch(() => null) as { detail?: unknown } | null;
+    throw new Error(formatApiErrorDetail(payload?.detail, "读取修改记录失败。"));
   }
   const payload = await response.json();
   if (!Array.isArray(payload)) throw new Error("修改记录返回了无法识别的数据。");
