@@ -60,21 +60,28 @@ function LoginScreen({ onLogin, error }: { onLogin: (username: string, phone: st
   const [phone, setPhone] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
+  const [passwordVisible, setPasswordVisible] = useState(false);
   async function submit(event: FormEvent) {
     event.preventDefault();
     setBusy(true);
     try { await onLogin(username, phone, password); } finally { setBusy(false); }
   }
   return (
-    <main style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: "#f7f8fa" }}>
-      <form onSubmit={submit} style={{ width: "min(360px, calc(100vw - 40px))", padding: 28, borderRadius: 20, background: "white", boxShadow: "0 18px 50px rgba(15,23,42,.10)" }}>
-        <h1 style={{ marginTop: 0 }}>AI 法务助手</h1>
-        <p style={{ color: "#64748b" }}>请输入已登记的用户名、手机号和密码；管理员可不填手机号。</p>
-        <input aria-label="用户名" value={username} onChange={(event) => setUsername(event.target.value)} placeholder="用户名" autoComplete="username" style={{ width: "100%", boxSizing: "border-box", padding: "11px 12px", marginBottom: 10, border: "1px solid #d9dee7", borderRadius: 10 }} />
-        <input aria-label="手机号" value={phone} onChange={(event) => setPhone(event.target.value)} placeholder="手机号" autoComplete="tel" inputMode="tel" style={{ width: "100%", boxSizing: "border-box", padding: "11px 12px", marginBottom: 10, border: "1px solid #d9dee7", borderRadius: 10 }} />
-        <input aria-label="密码" type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="密码" autoComplete="current-password" style={{ width: "100%", boxSizing: "border-box", padding: "11px 12px", marginBottom: 14, border: "1px solid #d9dee7", borderRadius: 10 }} />
-        {error && <p role="alert" style={{ color: "#b42318", fontSize: 13 }}>{error}</p>}
-        <button type="submit" disabled={busy || !username || !password} style={{ width: "100%", padding: "11px 12px", border: 0, borderRadius: 10, background: "#1f2937", color: "white", cursor: "pointer" }}>{busy ? "登录中…" : "登录"}</button>
+    <main className="login-minimal-page">
+      <form className="login-minimal-panel" onSubmit={submit}>
+        <h1>欢迎使用 AI 法务助手</h1>
+        <p className="login-minimal-subtitle">合同审查与法规知识服务平台</p>
+        <label htmlFor="login-username">用户名</label>
+        <input id="login-username" aria-label="用户名" value={username} onChange={(event) => setUsername(event.target.value)} placeholder="请输入用户名" autoComplete="username" />
+        <label htmlFor="login-phone">手机号 <span>管理员可不填</span></label>
+        <input id="login-phone" aria-label="手机号" value={phone} onChange={(event) => setPhone(event.target.value)} placeholder="请输入手机号" autoComplete="tel" inputMode="tel" />
+        <label htmlFor="login-password">密码</label>
+        <div className="login-minimal-password">
+          <input id="login-password" aria-label="密码" type={passwordVisible ? "text" : "password"} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="请输入密码" autoComplete="current-password" />
+          <button type="button" onClick={() => setPasswordVisible((visible) => !visible)} aria-label={passwordVisible ? "隐藏密码" : "显示密码"}>{passwordVisible ? "隐藏" : "显示"}</button>
+        </div>
+        {error && <p className="login-minimal-error" role="alert">{error}</p>}
+        <button className="login-minimal-submit" type="submit" disabled={busy || !username || !password}>{busy ? "登录中…" : "登录"}</button>
       </form>
     </main>
   );

@@ -31,6 +31,130 @@ body {
   min-height: 100vh;
 }
 
+/* Minimal login screen: intentionally detached from the workspace visual system. */
+.login-minimal-page {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 56px 22px;
+  background: #ffffff;
+  color: #18191b;
+}
+
+.login-minimal-panel {
+  width: min(100%, 430px);
+}
+
+.login-minimal-panel h1 {
+  margin: 0;
+  text-align: center;
+  color: #18191b;
+  font-size: clamp(1.8rem, 3vw, 2.15rem);
+  letter-spacing: -0.08rem;
+  line-height: 1.2;
+}
+
+.login-minimal-subtitle {
+  margin: 12px 0 38px;
+  color: #707277;
+  text-align: center;
+  font-size: 0.94rem;
+  line-height: 1.6;
+}
+
+.login-minimal-panel label {
+  display: block;
+  margin: 17px 0 8px;
+  color: #18191b;
+  font-size: 0.88rem;
+  font-weight: 700;
+}
+
+.login-minimal-panel label span {
+  float: right;
+  color: #96979a;
+  font-size: 0.75rem;
+  font-weight: 400;
+}
+
+.login-minimal-panel input {
+  width: 100%;
+  height: 45px;
+  padding: 0 14px;
+  border: 1px solid #dcdde0;
+  border-radius: 9px;
+  outline: none;
+  background: #ffffff;
+  color: #18191b;
+  font: inherit;
+  font-size: 0.9rem;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.login-minimal-panel input::placeholder {
+  color: #a3a4a7;
+}
+
+.login-minimal-panel input:focus {
+  border-color: #5f6063;
+  box-shadow: 0 0 0 3px rgb(24 25 27 / 8%);
+}
+
+.login-minimal-password {
+  position: relative;
+}
+
+.login-minimal-password input {
+  padding-right: 60px;
+}
+
+.login-minimal-password button {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 56px;
+  height: 45px;
+  border: 0;
+  background: transparent;
+  color: #6e7074;
+  cursor: pointer;
+  font-size: 0.78rem;
+}
+
+.login-minimal-password button:hover {
+  transform: none;
+  color: #18191b;
+}
+
+.login-minimal-error {
+  margin: 14px 0 -9px;
+  color: #b42318;
+  font-size: 0.82rem;
+}
+
+.login-minimal-submit {
+  width: 100%;
+  height: 45px;
+  margin-top: 25px;
+  border: 0;
+  border-radius: 9px;
+  background: #18191b;
+  color: #ffffff;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.94rem;
+  font-weight: 700;
+}
+
+.login-minimal-submit:hover:not(:disabled) {
+  background: #323336;
+}
+
+.login-minimal-submit:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
 .hidden-file-input {
   position: absolute;
   width: 1px;
