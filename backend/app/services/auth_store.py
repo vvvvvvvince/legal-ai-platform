@@ -191,23 +191,15 @@ class AuthStore:
             )
         return UserIdentity(user_id, normalized, normalized_phone, display_name.strip(), workspace_id, is_admin)
 
-    def authenticate(self, username: str, phone: str, password: str) -> UserIdentity | None:
+    def authenticate(self, username: str, password: str) -> UserIdentity | None:
         normalized = username.strip().lower()
-        try:
-            normalized_phone = _normalize_phone(phone) if phone else ""
-        except ValueError:
-            return None
         with self._connect() as connection:
-            if normalized_phone:
-                row = connection.execute(
-                    "SELECT * FROM users WHERE username = ? AND phone = ? AND is_active = 1",
-                    (normalized, normalized_phone),
-                ).fetchone()
-            else:
-                row = connection.execute(
-                    "SELECT * FROM users WHERE username = ? AND is_admin = 1 AND is_active = 1",
-                    (normalized,),
-                ).fetchone()
+            # Phone numbers remain a unique user profile field for future SMS
+            # features, but are deliberately not part of the login credential.
+            row = connection.execute(
+                "SELECT * FROM users WHERE username = ? AND is_active = 1",
+                (normalized,),
+            ).fetchone()
         if row is None or not _verify_password(password, row["password_hash"]):
             return None
         return self._identity(row)

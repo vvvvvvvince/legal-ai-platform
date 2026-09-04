@@ -77,7 +77,6 @@ PDF_QUALITY_NOTES = {
 
 class LoginRequest(BaseModel):
     username: str
-    phone: str = ""
     password: str
 
 
@@ -343,7 +342,7 @@ def login(payload: LoginRequest, request: Request, response: Response) -> dict[s
         window_seconds=window_seconds,
     ):
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="登录尝试过多，请稍后再试。")
-    identity = store.authenticate(payload.username, payload.phone, payload.password)
+    identity = store.authenticate(payload.username, payload.password)
     if identity is None:
         store.record_login_failure(payload.username, client_key, window_seconds=window_seconds)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户名或密码错误。")

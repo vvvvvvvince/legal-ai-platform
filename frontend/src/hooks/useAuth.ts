@@ -12,10 +12,10 @@ export function useAuth() {
     }).finally(() => setIsReady(true));
   }, []);
 
-  const signIn = useCallback(async (username: string, phone: string, password: string) => {
+  const signIn = useCallback(async (username: string, password: string) => {
     setError(null);
     try {
-      const next = await login(username, phone, password);
+      const next = await login(username, password);
       setIdentity(next);
     } catch (reason) {
       const message = reason instanceof Error ? reason.message : "登录失败。";

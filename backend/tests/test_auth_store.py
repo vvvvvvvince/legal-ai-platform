@@ -7,15 +7,15 @@ def test_password_hash_only_authenticates_original_password(tmp_path):
     store = AuthStore(tmp_path / "auth.sqlite3")
     user = store.create_user("alice", "Alice", "correct-password", "13800000001")
 
-    assert store.authenticate("alice", "13800000001", "correct-password").user_id == user.user_id
-    assert store.authenticate("alice", "13800000001", "wrong-password") is None
+    assert store.authenticate("alice", "correct-password").user_id == user.user_id
+    assert store.authenticate("alice", "wrong-password") is None
 
 
-def test_invalid_phone_is_a_failed_login_not_a_server_error(tmp_path):
+def test_authentication_does_not_require_phone(tmp_path):
     store = AuthStore(tmp_path / "auth.sqlite3")
     store.create_user("alice", "Alice", "correct-password", "13800000001")
 
-    assert store.authenticate("alice", "not-a-phone", "correct-password") is None
+    assert store.authenticate("alice", "correct-password") is not None
 
 
 def test_session_round_trip_returns_shared_workspace_identity(tmp_path):

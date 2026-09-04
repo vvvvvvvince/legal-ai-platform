@@ -55,16 +55,15 @@ const standardReviewAngles = [
   "争议解决",
 ];
 
-function LoginScreen({ onLogin, error }: { onLogin: (username: string, phone: string, password: string) => Promise<void>; error: string | null }) {
+function LoginScreen({ onLogin, error }: { onLogin: (username: string, password: string) => Promise<void>; error: string | null }) {
   const [username, setUsername] = useState("");
-  const [phone, setPhone] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [passwordVisible, setPasswordVisible] = useState(false);
   async function submit(event: FormEvent) {
     event.preventDefault();
     setBusy(true);
-    try { await onLogin(username, phone, password); } finally { setBusy(false); }
+    try { await onLogin(username, password); } finally { setBusy(false); }
   }
   return (
     <main className="login-minimal-page">
@@ -73,8 +72,6 @@ function LoginScreen({ onLogin, error }: { onLogin: (username: string, phone: st
         <p className="login-minimal-subtitle">合同审查与法规知识服务平台</p>
         <label htmlFor="login-username">用户名</label>
         <input id="login-username" aria-label="用户名" value={username} onChange={(event) => setUsername(event.target.value)} placeholder="请输入用户名" autoComplete="username" />
-        <label htmlFor="login-phone">手机号 <span>管理员可不填</span></label>
-        <input id="login-phone" aria-label="手机号" value={phone} onChange={(event) => setPhone(event.target.value)} placeholder="请输入手机号" autoComplete="tel" inputMode="tel" />
         <label htmlFor="login-password">密码</label>
         <div className="login-minimal-password">
           <input id="login-password" aria-label="密码" type={passwordVisible ? "text" : "password"} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="请输入密码" autoComplete="current-password" />

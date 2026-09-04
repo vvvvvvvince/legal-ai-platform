@@ -25,12 +25,12 @@ async function readError(response: Response, fallback: string): Promise<Error> {
   return new Error(formatApiErrorDetail(payload?.detail, fallback));
 }
 
-export async function login(username: string, phone: string, password: string): Promise<SessionIdentity> {
+export async function login(username: string, password: string): Promise<SessionIdentity> {
   const response = await fetch("/api/auth/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "same-origin",
-    body: JSON.stringify({ username, phone, password }),
+    body: JSON.stringify({ username, password }),
   });
   if (!response.ok) throw await readError(response, "登录失败，请检查用户名和密码。");
   return await response.json() as SessionIdentity;
