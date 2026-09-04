@@ -23,6 +23,10 @@ def test_app_uses_lifespan_context_instead_of_legacy_events():
 
 
 def test_create_review_job_returns_202_and_tenant_filters_lookup(monkeypatch, tmp_path):
+    # Keep the legacy tenant-header path isolated from a developer's populated
+    # local auth database.  Other tests cover authenticated workspaces.
+    monkeypatch.setenv("AUTH_DB", str(tmp_path / "auth.sqlite3"))
+    monkeypatch.delenv("AUTH_BOOTSTRAP_USERS_JSON", raising=False)
     monkeypatch.setenv("REVIEW_JOB_DB", str(tmp_path / "jobs.sqlite3"))
     monkeypatch.setenv("REVIEW_JOB_WORKER_ENABLED", "false")
 

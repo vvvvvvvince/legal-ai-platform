@@ -14,6 +14,7 @@ from pydantic import ValidationError
 
 from app.schemas.review import LawReference, ReviewCoverage, ReviewResponse
 from app.services.rag_service import format_laws_for_prompt, retrieve_relevant_laws
+from app.services.fastgpt_knowledge import format_fastgpt_knowledge_for_prompt, retrieve_fastgpt_knowledge
 from app.services.rule_review import RULE_TOPICS, run_rule_fallback
 from app.services.document_preflight import PREFLIGHT_SCOPE, run_document_preflight
 from app.services.review_verifier import verify_high_risk_findings
@@ -1003,6 +1004,7 @@ def _review_contract_segment(
         retrieval_warning = f"法规检索失败：{exc}；本次结论需人工复核。"
 
     law_context = format_laws_for_prompt(relevant_laws)
+    fastgpt_context = format_fastgpt_knowledge_for_prompt(retrieve_fastgpt_knowledge(retrieval_query))
     contract_language = _infer_contract_language(contract_text)
     indexed_contract, paragraph_references = format_contract_with_paragraph_references(contract_text)
 
@@ -1043,6 +1045,7 @@ def _review_contract_segment(
                         "若合同为中英混合，suggestion 必须跟随 original_text 或 insert_after_text 所在章节的语言。\n\n"
                         "法规引用约束：laws 只能从下方参考法条中原样选择，不能凭记忆补写法规名称或条文号；如果下方没有足够依据，laws 必须返回空数组，并在 review_summary 或 warnings 中说明需人工核验。\n"
                         f"参考法条：\n{law_context}\n\n"
+                        f"FastGPT 只读知识库参考（仅作为待核验材料，不能编造或替代法律依据）：\n{fastgpt_context}\n\n"
                         f"合同文本（段落编号仅用于定位）：\n{_trim_contract_text(indexed_contract)}"
                     ),
                 },

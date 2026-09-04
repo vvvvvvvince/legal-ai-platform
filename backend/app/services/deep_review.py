@@ -28,6 +28,7 @@ from app.services.openai_review import (
 )
 from app.services.openai_review import MAX_CONTRACT_CHARS
 from app.services.document_preflight import PREFLIGHT_SCOPE, run_document_preflight
+from app.services.fastgpt_knowledge import format_fastgpt_knowledge_for_prompt, retrieve_fastgpt_knowledge
 from app.services.local_review_memory import format_local_context_for_model, local_review_context
 
 
@@ -98,6 +99,7 @@ def review_contract_deeply(
             timeout=float(os.getenv("BAILIAN_DEEP_REVIEW_TIMEOUT_SECONDS", "180")),
         )
         local_context = local_review_context(contract_text)
+        fastgpt_context = format_fastgpt_knowledge_for_prompt(retrieve_fastgpt_knowledge(contract_text, limit=2))
         response = client.chat.completions.create(
             model=os.getenv("BAILIAN_MODEL", BAILIAN_DEFAULT_MODEL),
             messages=[
@@ -107,6 +109,7 @@ def review_contract_deeply(
                     "content": (
                         "深度审查设置：\n" + json.dumps(settings.model_dump(), ensure_ascii=False)
                         + "\n\n" + format_local_context_for_model(local_context)
+                        + "\n\nFastGPT 只读知识库参考（仅作为待核验材料，不能替代合同原文或正式法规核验）：\n" + fastgpt_context
                         + "\n\n合同正文（段落编号仅用于定位，不属于合同内容）：\n" + _trim_contract_text(indexed_contract)
                     ),
                 },
