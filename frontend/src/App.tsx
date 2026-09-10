@@ -615,6 +615,12 @@ function getInsertionAnchor(risk: ReviewRisk): string | null {
   return risk.insert_after_text?.trim() || risk.anchor_text?.trim() || null;
 }
 
+function cleanSuggestedContractText(suggestion: string) {
+  // Suggestions are contract text, not an instruction label.  Some providers
+  // still prepend “修改为：”; never write that label into the contract.
+  return suggestion.trim().replace(/^(?:建议\s*)?修改为\s*[：:]\s*/u, "").trim();
+}
+
 function findUniqueExactMatch(text: string, query: string): { from: number; to: number } | null {
   if (!query) {
     return null;
@@ -1064,6 +1070,15 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
     }).catch((reason: unknown) => {
       setError(getErrorMessage(reason));
     });
+  }
+
+  function setModificationEditorName(modification: Modification, name: string, persist = false) {
+    const editorDisplayName = name.trim() || auth.identity?.display_name || "当前用户";
+    const updated = { ...modification, editor_display_name: editorDisplayName };
+    setModifications((previous) => previous.map((item) => (
+      isSameModification(item, modification) ? updated : item
+    )));
+    if (persist) saveModificationInBackground(updated);
   }
 
   const sortedRisks = useMemo(() => {
@@ -1564,6 +1579,11 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
       setError("编辑器尚未准备好，请稍后重试。");
       return;
     }
+    const suggestion = cleanSuggestedContractText(risk.suggestion);
+    if (!suggestion) {
+      setError("该建议没有可写入合同的条款文本，请先手动编辑后再应用。");
+      return;
+    }
 
     const currentText = editorText;
     const currentHtml = editor.getHTML();
@@ -1580,10 +1600,10 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
     const nextParagraphs = textToParagraphs(currentText);
     const insertAtIndex = anchorMeta ? anchorMeta.index + 1 : nextParagraphs.length;
     const revisionId = `risk-${riskKey}`;
-    nextParagraphs.splice(insertAtIndex, 0, risk.suggestion);
+    nextParagraphs.splice(insertAtIndex, 0, suggestion);
 
     const nextHtmlParagraphs = [...htmlParagraphs];
-    nextHtmlParagraphs.splice(insertAtIndex, 0, buildInsertedParagraphHtml(risk.suggestion, revisionId));
+    nextHtmlParagraphs.splice(insertAtIndex, 0, buildInsertedParagraphHtml(suggestion, revisionId));
 
     editor.commands.setContent(nextHtmlParagraphs.join(""));
     setEditorText(nextParagraphs.join("\n"));
@@ -1598,7 +1618,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
       item: risk.item,
       risk_key: riskKey,
       original: MISSING_SENTINEL,
-      modified: risk.suggestion,
+      modified: suggestion,
       revision_id: revisionId,
       anchor_text: risk.anchor_text ?? null,
       insert_after_text: anchorText ?? risk.insert_after_text ?? risk.anchor_text ?? null
@@ -1608,15 +1628,20 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
       modification
     ]);
     saveModificationInBackground(modification);
-    void submitFeedback(risk, riskKey, "edited", risk.suggestion);
+    void submitFeedback(risk, riskKey, "edited", suggestion);
 
     const insertedOffset = nextParagraphs.slice(0, insertAtIndex).join("\n").length + (insertAtIndex > 0 ? 1 : 0);
-    revealEditorSelection(Math.max(1, insertedOffset + 1), Math.max(1, insertedOffset + risk.suggestion.length + 1));
+    revealEditorSelection(Math.max(1, insertedOffset + 1), Math.max(1, insertedOffset + suggestion.length + 1));
   }
 
   function applySuggestionAtSelectedLocation(risk: ReviewRisk, riskKey: string, candidate: RiskLocationCandidate) {
     if (!editor || !candidate.exactOriginal) {
       setError("请先选择一段包含完整原文的候选条款；相似匹配只能用于定位，不能自动改写。");
+      return;
+    }
+    const suggestion = cleanSuggestedContractText(risk.suggestion);
+    if (!suggestion) {
+      setError("该建议没有可写入合同的条款文本，请先手动编辑后再应用。");
       return;
     }
 
@@ -1634,7 +1659,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
       return;
     }
 
-    const nextParagraph = paragraphText.slice(0, index) + risk.suggestion + paragraphText.slice(index + original.length);
+    const nextParagraph = paragraphText.slice(0, index) + suggestion + paragraphText.slice(index + original.length);
     const nextText = [...paragraphs.slice(0, candidate.paragraphIndex), nextParagraph, ...paragraphs.slice(candidate.paragraphIndex + 1)].join("\n");
     const htmlParagraphs = getHtmlParagraphs(editor.getHTML());
     if (!htmlParagraphs[candidate.paragraphIndex]) {
@@ -1642,7 +1667,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
       return;
     }
     const revisionId = `risk-${riskKey}`;
-    htmlParagraphs[candidate.paragraphIndex] = buildReplacementDiffHtml(paragraphText, original, risk.suggestion, index, revisionId);
+    htmlParagraphs[candidate.paragraphIndex] = buildReplacementDiffHtml(paragraphText, original, suggestion, index, revisionId);
     editor.commands.setContent(htmlParagraphs.join(""));
     setEditorText(nextText);
     setSelectedRiskLocations((previous) => {
@@ -1656,7 +1681,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
       item: risk.item,
       risk_key: riskKey,
       original,
-      modified: risk.suggestion,
+      modified: suggestion,
       revision_id: revisionId,
       anchor_text: risk.anchor_text ?? null,
       insert_after_text: risk.insert_after_text ?? null,
@@ -1667,8 +1692,8 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
       modification
     ]);
     saveModificationInBackground(modification);
-    void submitFeedback(risk, riskKey, "edited", risk.suggestion);
-    revealEditorSelection(Math.max(1, candidate.from + index + 1), Math.max(1, candidate.from + index + risk.suggestion.length + 1));
+    void submitFeedback(risk, riskKey, "edited", suggestion);
+    revealEditorSelection(Math.max(1, candidate.from + index + 1), Math.max(1, candidate.from + index + suggestion.length + 1));
   }
 
   function applySuggestion(risk: ReviewRisk, riskKey: string) {
@@ -1679,6 +1704,11 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
 
     const missing = isMissingClause(risk.original_text);
     const currentText = editorText;
+    const suggestion = cleanSuggestedContractText(risk.suggestion);
+    if (!suggestion) {
+      setError("该建议没有可写入合同的条款文本，请先手动编辑后再应用。");
+      return;
+    }
     setActiveRiskKey(riskKey);
 
     if (missing) {
@@ -1717,7 +1747,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
     }
 
     const nextText =
-      currentText.slice(0, originalIndex) + risk.suggestion + currentText.slice(originalIndex + risk.original_text.length);
+      currentText.slice(0, originalIndex) + suggestion + currentText.slice(originalIndex + risk.original_text.length);
     const currentHtml = editor.getHTML();
     const htmlParagraphs = getHtmlParagraphs(currentHtml);
     const nextHtmlParagraphs = [...htmlParagraphs];
@@ -1725,7 +1755,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
     nextHtmlParagraphs[paragraphMeta.index] = buildReplacementDiffHtml(
       paragraphMeta.text,
       risk.original_text,
-      risk.suggestion,
+      suggestion,
       undefined,
       revisionId,
     );
@@ -1738,7 +1768,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
       item: risk.item,
       risk_key: riskKey,
       original: risk.original_text,
-      modified: risk.suggestion,
+      modified: suggestion,
       revision_id: revisionId,
       anchor_text: risk.anchor_text ?? null,
       insert_after_text: risk.insert_after_text ?? null,
@@ -1749,9 +1779,9 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
       modification
     ]);
     saveModificationInBackground(modification);
-    void submitFeedback(risk, riskKey, "edited", risk.suggestion);
+    void submitFeedback(risk, riskKey, "edited", suggestion);
 
-    revealEditorSelection(Math.max(1, originalIndex + 1), Math.max(1, originalIndex + risk.suggestion.length + 1));
+    revealEditorSelection(Math.max(1, originalIndex + 1), Math.max(1, originalIndex + suggestion.length + 1));
   }
 
   async function undoRiskModification(risk: ReviewRisk, riskKey: string) {
@@ -2127,23 +2157,16 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
         throw new Error("深度审查未返回完整的审查说明，系统未开放修改与导出。");
       }
 
-      const autoApplied = applyPreciselyLocatedChanges(
-        result.contract_text ?? contractOverview.contract_text,
-        result.preflight_checks ?? [],
-        result.risks,
-      );
-      pendingRevisionHtmlRef.current = autoApplied.revisionHtml;
-      setReview({ ...result, contract_text: result.contract_text ?? contractOverview.contract_text, manual_review_required: true });
+      const sourceText = result.contract_text ?? contractOverview.contract_text;
+      // Review results must remain suggestions until a reviewer explicitly
+      // confirms an individual change.  Never mutate the contract on arrival.
+      pendingRevisionHtmlRef.current = null;
+      setReview({ ...result, contract_text: sourceText, manual_review_required: true });
       setContractOverview(null);
-      setModifications(autoApplied.modifications);
-      for (const modification of autoApplied.modifications) {
-        saveModificationInBackground(modification, completedJob.job_id);
-      }
-      setEditorText(autoApplied.correctedText);
+      setModifications([]);
+      setEditorText(sourceText);
       setReviewStage("modification");
-      const reviewNote = autoApplied.modifications.length
-        ? `综合审查已完成；已自动定位并写入 ${autoApplied.modifications.length} 处可精确匹配的修改。右侧可逐项撤销；未唯一定位的建议保留为人工确认。`
-        : "综合审查已完成。未发现可唯一定位的自动修改；请在右侧确认候选段落后再处理建议。";
+      const reviewNote = "综合审查已完成。所有审核意见均保留为待确认建议；系统不会自动修改合同正文。请逐项定位、核对后再确认应用。";
       setEditorNotice(sourceDocxWarning ? `${reviewNote} ${sourceDocxWarning}` : reviewNote);
       if (sourceDocxWarning) setError(sourceDocxWarning);
     } catch (reviewError) {
@@ -2188,7 +2211,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
 
   async function copySuggestionToClipboard(risk: ReviewRisk) {
     try {
-      await navigator.clipboard.writeText(risk.suggestion);
+      await navigator.clipboard.writeText(cleanSuggestedContractText(risk.suggestion));
       setEditorNotice(`已复制“${risk.item}”的修改建议。请在确认对应原文后手动粘贴或编辑。`);
     } catch {
       setError("无法复制修改建议。请直接从右侧卡片选择并复制文字。");
@@ -2706,7 +2729,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
                               <div className="risk-chip-row">
                                 <span>{levelLabel[risk.level]}</span>
                                 <span className={`acceptance-chip${accepted ? " acceptance-chip-done" : ""}`}>
-                                  {accepted ? "已自动修改" : "待处理"}
+                                  {accepted ? "已应用" : "待确认"}
                                 </span>
                               </div>
                               <span className={`evidence-chip${risk.evidence_status === "verified" ? " evidence-chip-verified" : ""}`}>
@@ -2730,16 +2753,16 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
                                 onClick={() => applySuggestion(risk, riskKey)}
                               >
                                 {accepted
-                                  ? "已处理"
+                                  ? "已应用"
                                   : reviewStage !== "modification"
                                     ? "深度审查后可修改"
                                     : needsManualOriginalLocation
                                       ? canApplyAtSelectedLocation
-                                        ? "在选中处引用"
-                                        : "确认定位后修改"
+                                        ? "确认并应用"
+                                        : "确认定位后应用"
                                       : isMissingClause(risk.original_text)
-                                        ? "由我补充"
-                                        : "引用修改"}
+                                        ? "确认并补充"
+                                        : "确认并应用"}
                               </button>
                               {accepted && appliedModification ? (
                                 <button className="secondary-button inline-button" type="button" onClick={() => void undoRiskModification(risk, riskKey)}>
@@ -2767,8 +2790,16 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
                             </div>
                           </div>
 
-                          {accepted && appliedModification?.actor_display_name ? (
-                            <p className="risk-title">修改人：{appliedModification.actor_display_name}</p>
+                          {accepted && appliedModification ? (
+                            <label className="risk-editor-name">
+                              <span>修改人</span>
+                              <input
+                                aria-label={`${risk.item}的修改人`}
+                                value={appliedModification.editor_display_name ?? appliedModification.actor_display_name ?? "当前用户"}
+                                onChange={(event) => setModificationEditorName(appliedModification, event.target.value)}
+                                onBlur={(event) => setModificationEditorName(appliedModification, event.target.value, true)}
+                              />
+                            </label>
                           ) : null}
 
                           <div className={`original-block${isMissingClause(risk.original_text) ? " original-missing" : ""}`}>
@@ -2812,7 +2843,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
                             </div>
                             <div className="suggestion-block">
                               <p className="risk-title">{isMissingClause(risk.original_text) ? "建议补充条款" : "修改建议"}</p>
-                              <p>{risk.suggestion}</p>
+                              <p>{cleanSuggestedContractText(risk.suggestion)}</p>
                             </div>
                           </div>
 

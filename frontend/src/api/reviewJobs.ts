@@ -38,6 +38,7 @@ export type ReviewModificationPayload = {
   original: string;
   modified: string;
   revision_id?: string;
+  editor_display_name?: string;
   anchor_text?: string | null;
   insert_after_text?: string | null;
   paragraph_context?: string | null;
@@ -111,6 +112,7 @@ export function normalizeReviewModification(payload: unknown): ReviewModificatio
       original: modification.original,
       modified: modification.modified,
       ...(typeof modification.revision_id === "string" ? { revision_id: modification.revision_id } : {}),
+      ...(typeof modification.editor_display_name === "string" ? { editor_display_name: modification.editor_display_name } : {}),
       ...(typeof modification.anchor_text === "string" ? { anchor_text: modification.anchor_text } : {}),
       ...(typeof modification.insert_after_text === "string" ? { insert_after_text: modification.insert_after_text } : {}),
       ...(typeof modification.paragraph_context === "string" ? { paragraph_context: modification.paragraph_context } : {}),

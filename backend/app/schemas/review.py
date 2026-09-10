@@ -31,6 +31,7 @@ class ReviewModificationInput(BaseModel):
     original: str = Field(min_length=1, max_length=20_000)
     modified: str = Field(max_length=20_000)
     revision_id: str | None = Field(default=None, max_length=300)
+    editor_display_name: str | None = Field(default=None, max_length=100)
     anchor_text: str | None = Field(default=None, max_length=20_000)
     insert_after_text: str | None = Field(default=None, max_length=20_000)
     paragraph_context: str | None = Field(default=None, max_length=20_000)

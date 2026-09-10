@@ -6633,6 +6633,33 @@ body {
   outline: none;
 }
 
+#root .robin-result-panel .risk-editor-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin: 1px 0 2px;
+  color: var(--ai-text-muted);
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+#root .robin-result-panel .risk-editor-name input {
+  width: 112px;
+  min-height: 30px;
+  padding: 4px 8px;
+  border: 1px solid var(--ai-border);
+  border-radius: 6px;
+  color: var(--ai-text);
+  background: #fff;
+  font: inherit;
+}
+
+#root .robin-result-panel .risk-editor-name input:focus {
+  border-color: var(--ai-accent);
+  outline: 2px solid rgb(15 118 110 / 14%);
+  outline-offset: 1px;
+}
+
 /* The composer is the only upload entry point. Keep its actions legible and
    deliberate instead of treating file upload as an unlabeled icon. */
 #root .legal-chat-shell-openc .legal-chat-composer-actions {
