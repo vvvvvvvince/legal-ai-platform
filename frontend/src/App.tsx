@@ -29,18 +29,6 @@ import { ReviewPanel } from "./features/review/ReviewPanel";
 
 import type { RiskLevel, RiskFilter, LawReference, ReviewRisk, ReviewCoverage, ReviewConsistencyCheck, DocumentQuality, DocumentPreflightCheck, PartyRole, ReviewStyle, DeepReviewSettings, DeepReviewOutput, ContractOverview, ContractOverviewResponse, IntakeChatMessage, IntakeReviewCriteria, IntakeChatResponse, LegalResearchResponse, ReviewResponse, Modification, FeedbackDecision, PreflightDecision, ParagraphOption, RiskWithKey, RiskLocationCandidate, ReviewStage, IntakeConversationStep, DeepReviewFormSettings } from "./domain/reviewTypes";
 
-const emptyIntakeCriteria: IntakeReviewCriteria = {
-  party_role: null,
-  other_party_role: "",
-  deal_priorities: [],
-  focus_areas: [],
-  review_style: "protective",
-  business_context: "",
-  non_negotiables: "",
-  special_requirements: [],
-  additional_notes: []
-};
-
 // These are always available after a contract is read. They are intentionally
 // independent from a model reply so the user never loses review controls when
 // the model does not ask a follow-up question or returns a partial response.
@@ -54,6 +42,20 @@ const standardReviewAngles = [
   "违约与救济",
   "争议解决",
 ];
+
+const defaultFocusAreas = [...standardReviewAngles];
+
+const emptyIntakeCriteria: IntakeReviewCriteria = {
+  party_role: null,
+  other_party_role: "",
+  deal_priorities: [],
+  focus_areas: [...defaultFocusAreas],
+  review_style: "protective",
+  business_context: "",
+  non_negotiables: "",
+  special_requirements: [],
+  additional_notes: []
+};
 
 function LoginScreen({ onLogin, error }: { onLogin: (username: string, password: string) => Promise<void>; error: string | null }) {
   const [username, setUsername] = useState("");
@@ -896,7 +898,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
     timeline_urgency: "",
     counterparty_context: "",
     deal_priorities: [],
-    focus_areas: [],
+    focus_areas: [...defaultFocusAreas],
     review_style: "protective",
     contract_type: "",
     special_requirements: [],
@@ -1317,7 +1319,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
       timeline_urgency: "",
       counterparty_context: "",
       deal_priorities: [],
-      focus_areas: [],
+      focus_areas: [...defaultFocusAreas],
       review_style: "protective",
       contract_type: "",
       special_requirements: [],
@@ -2340,14 +2342,14 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
           </article>
         ) : null}
 
-        {contractOverview ? (
+        {contractOverview && reviewStage === "intake" ? (
           <section className="legal-chat-review-angles" aria-label="常用审核角度">
             <div className="legal-chat-review-angles-heading">
               <div>
                 <span>常用审核角度</span>
                 <strong>选择需要优先核对的内容</strong>
               </div>
-              <b>{deepReviewSettings.focus_areas.length ? `已选 ${deepReviewSettings.focus_areas.length} 项` : "可多选"}</b>
+              <b>{deepReviewSettings.focus_areas.length === standardReviewAngles.length ? "已全选" : deepReviewSettings.focus_areas.length ? `已选 ${deepReviewSettings.focus_areas.length} 项` : "可多选"}</b>
             </div>
             <p>这些选项始终可用；即使模型没有给出快捷建议，也可以直接选择。未选项目仍会进行基础合同审查。</p>
             <div className="legal-chat-review-angle-options">
