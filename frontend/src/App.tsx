@@ -912,7 +912,6 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
   const [isIntakeChatLoading, setIsIntakeChatLoading] = useState(false);
   const [intakeReadyForReview, setIntakeReadyForReview] = useState(false);
   const [intakeChatWarning, setIntakeChatWarning] = useState<string | null>(null);
-  const [focusSelectionNotice, setFocusSelectionNotice] = useState<string | null>(null);
   const [additionalNoteDraft, setAdditionalNoteDraft] = useState("");
   const [intakeConversationStep, setIntakeConversationStep] = useState<IntakeConversationStep>("role");
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
@@ -1061,11 +1060,6 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
     () => contractOverview ? getIntakeRecommendations(contractOverview.overview) : null,
     [contractOverview],
   );
-  const quickFocusOptions = useMemo(() => {
-    const recommended = intakeRecommendations?.focus ?? [];
-    const selected = deepReviewSettings.focus_areas;
-    return Array.from(new Set([...recommended, ...selected, ...standardReviewAngles])).slice(0, 8);
-  }, [deepReviewSettings.focus_areas, intakeRecommendations]);
   const intakeInstructionSummary = useMemo(() => {
     const parts = [
       deepReviewSettings.party_role === "party_a" ? "以甲方/采购方立场" : deepReviewSettings.party_role === "party_b" ? "以乙方/供应商立场" : deepReviewSettings.party_role === "other" ? `以${deepReviewSettings.other_party_role || "自定义角色"}立场` : "待确认我方立场",
@@ -1792,32 +1786,6 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
     setError(null);
   }
 
-  function toggleDeepSettingOption(field: "deal_priorities" | "focus_areas" | "special_requirements", option: string) {
-    setDeepReviewSettings((current) => {
-      const selected = current[field];
-      const limit = field === "deal_priorities" ? 6 : 8;
-      if (!selected.includes(option) && selected.length >= limit) {
-        setError(`“${field === "deal_priorities" ? "交易目标" : field === "focus_areas" ? "重点关注" : "不可让步事项"}”最多选择 ${limit} 项，请先取消不适用的选项。`);
-        return current;
-      }
-      const next = selected.includes(option)
-        ? selected.filter((item) => item !== option)
-        : [...selected, option];
-      if (field === "focus_areas") {
-        const description = next.length
-          ? `已确认重点审核项：${next.join("、")}。后续对话与综合审查将优先核对这些内容。`
-          : "已取消全部重点审核项。后续将按基础合同审查范围进行。";
-        setFocusSelectionNotice(description);
-        // Keep the conversational payload in sync too.  This means the next
-        // AI reply can acknowledge the exact choices without requiring a
-        // separate submit action.
-        setIntakeCriteria((criteria) => ({ ...criteria, focus_areas: next }));
-      }
-      setError(null);
-      return { ...current, [field]: next };
-    });
-  }
-
   function applyScenarioPreset(preset: typeof scenarioPresets[number]) {
     setDeepReviewSettings((current) => ({
       ...current,
@@ -1939,8 +1907,8 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
       }].slice(-12);
       setIntakeMessages(nextMessages);
       setIntakeCriteria(response.criteria);
-      // A user can select review angles directly in the chat. Keep those
-      // choices when the next model turn updates the conversational criteria.
+      // Review coverage is fixed to the full standard set. Model suggestions
+      // must not narrow it or turn it into a user-managed scope selector.
       setDeepReviewSettings((current) => {
         const next = criteriaToDeepReviewSettings(response.criteria, overview.overview);
         return {
@@ -2342,46 +2310,6 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
           </article>
         ) : null}
 
-        {contractOverview && reviewStage === "intake" ? (
-          <section className="legal-chat-review-angles" aria-label="常用审核角度">
-            <div className="legal-chat-review-angles-heading">
-              <div>
-                <span>常用审核角度</span>
-                <strong>选择需要优先核对的内容</strong>
-              </div>
-              <b>{deepReviewSettings.focus_areas.length === standardReviewAngles.length ? "已全选" : deepReviewSettings.focus_areas.length ? `已选 ${deepReviewSettings.focus_areas.length} 项` : "可多选"}</b>
-            </div>
-            <p>这些选项始终可用；即使模型没有给出快捷建议，也可以直接选择。未选项目仍会进行基础合同审查。</p>
-            <div className="legal-chat-review-angle-options">
-              {quickFocusOptions.map((option) => {
-                const selected = deepReviewSettings.focus_areas.includes(option);
-                return (
-                  <button
-                    key={option}
-                    type="button"
-                    className={selected ? "legal-chat-review-angle-selected" : ""}
-                    aria-pressed={selected}
-                    disabled={isLoading || isIntakeChatLoading}
-                    onClick={() => toggleDeepSettingOption("focus_areas", option)}
-                  >
-                    {option}
-                  </button>
-                );
-              })}
-            </div>
-          </section>
-        ) : null}
-
-        {focusSelectionNotice ? (
-          <article className="legal-chat-message legal-chat-message-assistant" aria-live="polite">
-            <LegalAssistantMark />
-            <div className="legal-chat-message-body">
-              <b>AI 法务助手</b>
-              <p>{focusSelectionNotice}</p>
-            </div>
-          </article>
-        ) : null}
-
         {intakeMessages.map((message, index) => {
           const isLatestMessage = index === intakeMessages.length - 1;
           const quickReplies = message.role === "assistant" && isLatestMessage && !isIntakeChatLoading
@@ -2449,7 +2377,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
             <p>{[
               intakeCriteria.party_role === "party_a" ? "我方为甲方/采购方" : intakeCriteria.party_role === "party_b" ? "我方为乙方/供应方" : intakeCriteria.party_role === "other" ? `我方角色：${intakeCriteria.other_party_role || "待补充"}` : "我方身份待确认",
               intakeCriteria.business_context && `业务目标：${intakeCriteria.business_context}`,
-              deepReviewSettings.focus_areas.length && `重点：${deepReviewSettings.focus_areas.join("、")}`,
+              "审查范围：系统将覆盖全部常用合同风险维度",
               intakeCriteria.non_negotiables && `底线：${intakeCriteria.non_negotiables}`,
             ].filter(Boolean).join("；")}</p>
             <small>这些信息只作为审查立场与谈判偏好，不会被视为合同中已经存在的约定。</small>
