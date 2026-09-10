@@ -963,7 +963,10 @@ async def export_reviewed_contract(
             if _review_job_store().get_job(review_job_id, identity.workspace_id) is None:
                 raise ValueError("review_job_id does not belong to this workspace")
             saved_authors = {
-                modification.modification_id: modification.actor_display_name
+                modification.modification_id: (
+                    str(modification.payload.get("editor_display_name") or "").strip()
+                    or modification.actor_display_name
+                )
                 for modification in _review_job_store().list_modifications(review_job_id, identity.workspace_id)
             }
         for modification in parsed_modifications:
