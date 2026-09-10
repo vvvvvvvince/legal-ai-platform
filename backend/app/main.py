@@ -5,7 +5,7 @@ import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from fastapi import Body, FastAPI, File, Form, Header, HTTPException, Request, Response, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -73,6 +73,25 @@ PDF_QUALITY_NOTES = {
     "partial": "PDF 仅部分页面识别出文本，可能存在漏审，需要人工复核。",
     "scanned": "PDF 疑似扫描件，当前仅识别到少量文本，需要 OCR 后复核。",
 }
+
+
+def build_reviewed_export_filename(original_filename: str, exported_at: datetime | None = None) -> str:
+    """Return a stable, human-readable filename for an exported contract."""
+    source_name = original_filename.replace("\\", "/").rsplit("/", 1)[-1].strip()
+    stem = Path(source_name).stem.strip() if source_name else ""
+    # Do not accumulate an old export date when a downloaded contract is re-exported.
+    stem = re.sub(r"^【\d{6}】\s*", "", stem)
+    stem = re.sub(r"[-_]\d{6}$", "", stem).strip() or "合同"
+    date = (exported_at or datetime.now().astimezone()).strftime("%y%m%d")
+    return f"【{date}】{stem}.docx"
+
+
+def attachment_content_disposition(filename: str) -> str:
+    """Use RFC 5987 encoding so Chinese filenames work in direct API downloads."""
+    return (
+        'attachment; filename="reviewed_contract.docx"; '
+        f"filename*=UTF-8''{quote(filename, safe='')}"
+    )
 
 
 class LoginRequest(BaseModel):
@@ -977,10 +996,8 @@ async def export_reviewed_contract(
         iter([export_result.content]),
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         headers={
-            "Content-Disposition": (
-                'attachment; filename="reviewed_contract.docx"'
-                if export_mode == "tracked"
-                else 'attachment; filename="final_contract.docx"'
+            "Content-Disposition": attachment_content_disposition(
+                build_reviewed_export_filename(file.filename)
             ),
             "X-Review-Requested-Modifications": str(export_result.requested),
             "X-Review-Applied-Modifications": str(export_result.applied),

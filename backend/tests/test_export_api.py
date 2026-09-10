@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 from io import BytesIO
 from zipfile import ZipFile
 
@@ -6,13 +7,21 @@ from docx import Document
 from fastapi.testclient import TestClient
 from lxml import etree
 
-from app.main import app
+from app.main import app, build_reviewed_export_filename
 from app.services.auth_store import AuthStore
 from app.services.docx_modifier import modify_docx_inplace
 
 
 client = TestClient(app)
 W_NS = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+
+
+def test_reviewed_export_filename_keeps_the_original_name_and_refreshes_date() -> None:
+    exported_at = datetime(2026, 9, 10)
+
+    assert build_reviewed_export_filename("销售合同.docx", exported_at) == "【260910】销售合同.docx"
+    assert build_reviewed_export_filename("【260908】销售合同.docx", exported_at) == "【260910】销售合同.docx"
+    assert build_reviewed_export_filename("销售合同-260908.docx", exported_at) == "【260910】销售合同.docx"
 
 
 def _build_docx_bytes() -> bytes:
@@ -87,7 +96,8 @@ def test_export_returns_modified_docx() -> None:
     )
 
     assert response.status_code == 200
-    assert response.headers["content-disposition"] == 'attachment; filename="reviewed_contract.docx"'
+    assert "filename*=UTF-8''" in response.headers["content-disposition"]
+    assert "contract.docx" in response.headers["content-disposition"]
 
     document_xml = _read_docx_xml(response.content, "word/document.xml")
     settings_xml = _read_docx_xml(response.content, "word/settings.xml")
@@ -448,7 +458,8 @@ def test_final_export_contains_no_revision_markup() -> None:
     )
 
     assert response.status_code == 200
-    assert response.headers["content-disposition"] == 'attachment; filename="final_contract.docx"'
+    assert "filename*=UTF-8''" in response.headers["content-disposition"]
+    assert "contract.docx" in response.headers["content-disposition"]
     document_xml = _read_docx_xml(response.content, "word/document.xml")
     settings_xml = _read_docx_xml(response.content, "word/settings.xml")
     assert document_xml.find(".//w:ins", W_NS) is None

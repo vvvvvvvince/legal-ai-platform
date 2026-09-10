@@ -856,6 +856,21 @@ function downloadBlob(blob: Blob, filename: string) {
   URL.revokeObjectURL(url);
 }
 
+function buildReviewedExportFilename(originalFilename: string, exportedAt = new Date()) {
+  const sourceName = originalFilename.split(/[\\/]/).pop() || "合同";
+  const extensionIndex = sourceName.lastIndexOf(".");
+  let stem = extensionIndex > 0 ? sourceName.slice(0, extensionIndex) : sourceName;
+
+  // Re-exporting a previously exported file should refresh the date instead of nesting prefixes.
+  stem = stem.replace(/^【\d{6}】\s*/, "").replace(/[-_]\d{6}$/, "").trim() || "合同";
+  const date = [
+    String(exportedAt.getFullYear()).slice(-2),
+    String(exportedAt.getMonth() + 1).padStart(2, "0"),
+    String(exportedAt.getDate()).padStart(2, "0"),
+  ].join("");
+  return `【${date}】${stem}.docx`;
+}
+
 export default function App() {
   const auth = useAuth();
   if (!auth.isReady) return <main style={{ minHeight: "100vh", display: "grid", placeItems: "center" }}>正在检查登录状态…</main>;
@@ -2217,7 +2232,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
 
     try {
       const exportResult = await exportReviewedContract(exportFile, exportModifications, activeJob?.job_id);
-      downloadBlob(exportResult.blob, "reviewed_contract.docx");
+      downloadBlob(exportResult.blob, buildReviewedExportFilename(exportFile.name));
       setEditorNotice(
         exportResult.skipped > 0
           ? `Word 审阅版已生成：已写入 ${exportResult.applied} 处可精确定位的修改；${exportResult.skipped} 条未采纳或无法回写的建议已跳过，仍保留在右侧供后续处理。`
