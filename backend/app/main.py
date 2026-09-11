@@ -27,7 +27,7 @@ from app.schemas.review import (
     TextReviewRequest,
 )
 from app.services.docx_modifier import modify_docx_inplace, parse_modifications
-from app.services.docx_parser import extract_docx_text
+from app.services.docx_parser import extract_docx_text, validate_docx_file_bytes
 from app.services.pdf_parser import extract_pdf_document
 from app.services.knowledge_import import (
     KnowledgeImportConflict,
@@ -50,7 +50,7 @@ from app.services.request_auth import (
     reset_current_identity,
     set_current_identity,
 )
-from app.services.review_job_files import has_source_docx, read_source_docx, save_source_docx
+from app.services.review_job_files import delete_source_docx, has_source_docx, read_source_docx, save_source_docx
 from app.services.review_jobs import IdempotencyConflict, ModificationSaveResult, ReviewJob, ReviewJobStore, ReviewJobWorker, ReviewModification
 from app.services.local_review_memory import local_review_context
 
@@ -68,6 +68,12 @@ REVIEW_SCOPE_NAMES = {
     "质量与售后", "违约与责任", "解除与终止", "知识产权", "保密与数据",
     "合规与许可", "通知与送达", "争议解决", "附件与文本一致性",
 }
+FULL_REVIEW_SCOPE = [
+    "基础质量与合同框架",
+    "主体与签约权限", "合同成立与效力", "标的与价格", "付款与发票", "交付与验收",
+    "质量与售后", "违约与责任", "解除与终止", "知识产权", "保密与数据",
+    "合规与许可", "通知与送达", "争议解决", "附件与文本一致性",
+]
 PDF_QUALITY_NOTES = {
     "searchable": "PDF 文本可搜索，已完成文本提取。",
     "partial": "PDF 仅部分页面识别出文本，可能存在漏审，需要人工复核。",
@@ -190,7 +196,11 @@ async def review_job_lifespan(application: FastAPI):
         raise RuntimeError("No active users configured; run scripts/bootstrap_users.py before production startup.")
     store = _review_job_store()
     store.recover_running_jobs()
-    store.cleanup_expired(int(job_runtime_config()["retention_days"]))
+    retention_days = int(job_runtime_config()["retention_days"])
+    expired_job_ids = store.list_expired_job_ids(retention_days)
+    store.cleanup_expired(retention_days)
+    for job_id in expired_job_ids:
+        delete_source_docx(job_id)
     enabled = os.getenv("REVIEW_JOB_WORKER_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
     if enabled:
         worker = ReviewJobWorker(
@@ -674,6 +684,10 @@ async def upload_review_job_source_docx(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty.")
     if len(file_bytes) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Uploaded file must be 50 MB or smaller.")
+    try:
+        validate_docx_file_bytes(file_bytes)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     await run_in_threadpool(save_source_docx, job_id, file_bytes)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -698,7 +712,7 @@ async def download_review_job_source_docx(
     return StreamingResponse(
         iter([file_bytes]),
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": attachment_content_disposition(filename)},
     )
 
 
@@ -787,22 +801,18 @@ async def review_contract(
 
     contract_text, document_quality = _parse_contract_document(file_bytes, file.filename)
 
-    selected_scope = None
+    # Full coverage is a product invariant.  Keep accepting the legacy field
+    # so older clients do not fail, but never let it narrow the actual review.
     if review_scope:
         try:
             decoded_scope = json.loads(review_scope)
             if isinstance(decoded_scope, list):
-                selected_scope = list(dict.fromkeys(item for item in decoded_scope if isinstance(item, str)))
-                unknown_scopes = [item for item in selected_scope if item not in REVIEW_SCOPE_NAMES]
+                requested_scope = list(dict.fromkeys(item for item in decoded_scope if isinstance(item, str)))
+                unknown_scopes = [item for item in requested_scope if item not in REVIEW_SCOPE_NAMES]
                 if unknown_scopes:
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail="review_scope contains unsupported review topics.",
-                    )
-                if not selected_scope:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="Select at least one review topic.",
                     )
             else:
                 raise HTTPException(
@@ -815,10 +825,12 @@ async def review_contract(
                 detail="review_scope must be a JSON array.",
             )
 
-    review_kwargs = {"contract_text": contract_text, "filename": file.filename}
-    if selected_scope is not None:
-        review_kwargs["selected_scope"] = selected_scope
-    review = await run_in_threadpool(review_contract_text, **review_kwargs)
+    review = await run_in_threadpool(
+        review_contract_text,
+        contract_text=contract_text,
+        filename=file.filename,
+        selected_scope=FULL_REVIEW_SCOPE,
+    )
     review.contract_text = contract_text
     review.document_quality = document_quality
     if document_quality.status in {"partial", "scanned"}:
@@ -879,24 +891,18 @@ async def review_contract_text_stage(
 ) -> ReviewResponse:
     """Run the substantive stage against the user's preflight-corrected text."""
     require_request_identity(x_api_token, x_tenant_id)
-    selected_scope = list(dict.fromkeys(request.review_scope))
-    unknown_scopes = [item for item in selected_scope if item not in REVIEW_SCOPE_NAMES]
+    requested_scope = list(dict.fromkeys(request.review_scope))
+    unknown_scopes = [item for item in requested_scope if item not in REVIEW_SCOPE_NAMES]
     if unknown_scopes:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="review_scope contains unsupported review topics.",
         )
-    if not selected_scope:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Select at least one review topic.",
-        )
-
     review = await run_in_threadpool(
         review_contract_text,
         contract_text=request.contract_text,
         filename=request.filename,
-        selected_scope=selected_scope,
+        selected_scope=FULL_REVIEW_SCOPE,
     )
     review.contract_text = request.contract_text
     return review

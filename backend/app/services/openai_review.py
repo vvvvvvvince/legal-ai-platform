@@ -69,9 +69,9 @@ SYSTEM_PROMPT = (
     "    不得改写、增删标点符号、空格或换行，不得翻译，不得概括。"
     "  - 如果该条款在合同中完全缺失（即合同根本没有提及该内容），"
     "    original_text 必须设为固定值：【缺失该约定】，并尽量提供 insert_after_text。"
-    "anchor_text 应尽量提供与风险相关的邻近标题、条款号或相邻原句，便于前端定位。"
+    "anchor_text 应尽量提供与风险相关的邻近标题、条款号或相邻原句，便于前端定位；不得填写 P093 等内部段落编号。"
     "insert_after_text 必须是合同中真实存在的完整原句或标题，用于定位新增条款插入位置；"
-    "如果无法判断插入位置，可返回 null。"
+    "如果无法判断插入位置，可返回 null；不得填写 P093 等内部段落编号。"
     "只输出 JSON，不要输出 Markdown。"
 )
 
@@ -131,6 +131,16 @@ def hydrate_review_clause_references(review: ReviewResponse, references: dict[st
     mismatched_quotes = 0
     missing_marker = "【缺失该约定】"
     for risk in review.risks:
+        # Pxxx is a model-facing locator, not user-facing contract text.  A
+        # provider may put it in an anchor field instead of clause_reference;
+        # resolve it before the UI ever receives the review payload.
+        for field in ("anchor_text", "insert_after_text"):
+            value = (getattr(risk, field) or "").strip()
+            field_reference = PARAGRAPH_REFERENCE_PATTERN.fullmatch(value)
+            if field_reference:
+                reference = f"P{int(field_reference.group(1)):03d}"
+                setattr(risk, field, references.get(reference))
+
         reference_match = PARAGRAPH_REFERENCE_PATTERN.fullmatch((risk.clause_reference or "").strip())
         if not reference_match:
             continue

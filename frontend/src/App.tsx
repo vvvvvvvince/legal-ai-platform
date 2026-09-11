@@ -611,14 +611,26 @@ function normalizeParagraphs(text: string): ParagraphOption[] {
   }));
 }
 
-function getInsertionAnchor(risk: ReviewRisk): string | null {
-  return risk.insert_after_text?.trim() || risk.anchor_text?.trim() || null;
+function getInsertionAnchor(risk: ReviewRisk, contractText = ""): string | null {
+  const rawAnchor = risk.insert_after_text?.trim() || risk.anchor_text?.trim() || "";
+  const paragraphReference = /^P(\d{1,5})$/iu.exec(rawAnchor);
+  if (!paragraphReference) {
+    return rawAnchor || null;
+  }
+
+  // P093 is an internal, model-facing paragraph ID. Resolve it to the real
+  // contract paragraph whenever possible; never expose the raw ID to users.
+  const paragraph = textToParagraphs(contractText)[Number(paragraphReference[1]) - 1]?.trim();
+  return paragraph || null;
 }
 
 function cleanSuggestedContractText(suggestion: string) {
-  // Suggestions are contract text, not an instruction label.  Some providers
-  // still prepend “修改为：”; never write that label into the contract.
-  return suggestion.trim().replace(/^(?:建议\s*)?修改为\s*[：:]\s*/u, "").trim();
+  // This field is displayed and written as final contract language. Providers
+  // occasionally add an explanatory prefix; never show or write it.
+  return suggestion
+    .trim()
+    .replace(/^(?:修改建议|修订建议|建议修改|建议补充|建议调整|建议|修改|修订|调整)(?:内容|条款|如下)?(?:为|如下)?\s*[：:]\s*/u, "")
+    .trim();
 }
 
 function findUniqueExactMatch(text: string, query: string): { from: number; to: number } | null {
@@ -636,7 +648,7 @@ function findUniqueExactMatch(text: string, query: string): { from: number; to: 
 
 function findRiskLocationCandidates(text: string, risk: ReviewRisk): RiskLocationCandidate[] {
   const query = risk.original_text.trim();
-  const anchor = getInsertionAnchor(risk) ?? "";
+  const anchor = getInsertionAnchor(risk, text) ?? "";
   const paragraphs = textToParagraphs(text);
   const candidates: RiskLocationCandidate[] = [];
   let from = 0;
@@ -1267,7 +1279,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
 
           const exactMatches = risksWithKeys.filter((riskEntry) => {
             const candidate = isMissingClause(riskEntry.risk.original_text)
-              ? getInsertionAnchor(riskEntry.risk) ?? ""
+              ? getInsertionAnchor(riskEntry.risk, editorText) ?? ""
               : riskEntry.risk.original_text;
             return Boolean(candidate && paragraphText.includes(candidate) && findUniqueExactMatch(editorText, candidate));
           });
@@ -1523,7 +1535,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
   }
 
   function locateRiskInEditor(risk: ReviewRisk) {
-    const candidate = isMissingClause(risk.original_text) ? getInsertionAnchor(risk) ?? "" : risk.original_text;
+    const candidate = isMissingClause(risk.original_text) ? getInsertionAnchor(risk, editorText) ?? "" : risk.original_text;
     if (!candidate) {
       return false;
     }
@@ -1568,7 +1580,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
     revealEditorSelection(candidate.from + candidate.selectionFrom + 1, candidate.from + candidate.selectionTo + 1);
     setEditorNotice(
       candidate.exactOriginal
-        ? `已确认“${risk.item}”的候选原文。现在可以在该段引用修改建议。`
+        ? `已确认“${risk.item}”的候选原文。现在可以直接确认应用修订。`
         : `已定位到“${risk.item}”的可能段落。该段仅供核对，不会自动替换相似文字。`
     );
     setError(null);
@@ -1676,7 +1688,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
       return next;
     });
     setError(null);
-    setEditorNotice(`已在您确认的段落中引用“${risk.item}”的修改建议。`);
+    setEditorNotice(`已在您确认的段落中应用“${risk.item}”的修订。`);
     const modification: Modification = {
       item: risk.item,
       risk_key: riskKey,
@@ -1712,7 +1724,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
     setActiveRiskKey(riskKey);
 
     if (missing) {
-      const anchor = getInsertionAnchor(risk) ?? "";
+      const anchor = getInsertionAnchor(risk, currentText) ?? "";
       const anchorMatch = anchor ? findUniqueExactMatch(currentText, anchor) : null;
 
       if (anchorMatch) {
@@ -2500,19 +2512,29 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
         </div>
       )}
       {showModelConfig && (
-        <div role="dialog" aria-modal="true" aria-label="切换模型" style={{ position: "fixed", inset: 0, zIndex: 40, display: "grid", placeItems: "center", padding: 20, background: "rgba(15,23,42,.38)" }}>
-          <section style={{ width: "min(480px, 100%)", borderRadius: 16, padding: 24, background: "#fff", boxShadow: "0 20px 60px rgba(15,23,42,.22)" }}>
-            <h2 style={{ marginTop: 0 }}>切换大模型</h2>
-            <p style={{ color: "#64748b" }}>切换后，后续对话和新发起的审核会使用新模型；进行中的任务不受影响。</p>
-            {modelConfig ? <select aria-label="模型" value={modelConfig.active_model} onChange={(event) => setModelConfig({ ...modelConfig, active_model: event.target.value })} style={{ width: "100%", padding: "11px 12px", border: "1px solid #d9dee7", borderRadius: 10 }}>
-              {modelConfig.allowed_models.map((model) => <option key={model} value={model}>{model}</option>)}
-            </select> : <p>正在读取可用模型…</p>}
-            {modelConfigError ? <p role="alert" style={{ color: "#b42318" }}>{modelConfigError}</p> : null}
-            <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 20 }}><button className="secondary-button" type="button" onClick={() => setShowModelConfig(false)}>取消</button><button className="primary-button" type="button" disabled={!modelConfig || isSavingModel} onClick={() => void saveModelConfig()}>{isSavingModel ? "保存中…" : "保存并切换"}</button></div>
-            <details style={{ marginTop: 22 }}><summary style={{ cursor: "pointer", fontWeight: 700 }}>新增自定义大模型</summary><p style={{ color: "#64748b", fontSize: 13 }}>API Key 仅保存到后端，普通用户无法查看。</p>
-              {([['display_name','显示名称，例如：内部模型'], ['model_id','模型 ID'], ['base_url','OpenAI 兼容接口地址'], ['api_key','API Key']] as const).map(([key, label]) => <input key={key} aria-label={label} type={key === 'api_key' ? 'password' : 'text'} placeholder={label} value={newModel[key]} onChange={(event) => setNewModel({ ...newModel, [key]: event.target.value })} style={{ display: "block", width: "100%", boxSizing: "border-box", padding: "10px 11px", marginTop: 9, border: "1px solid #d9dee7", borderRadius: 9 }} />)}
-              <button className="secondary-button" type="button" disabled={isSavingModel || !newModel.display_name || !newModel.model_id || !newModel.base_url || !newModel.api_key} onClick={() => void saveNewModel()} style={{ marginTop: 10 }}>{isSavingModel ? "保存中…" : "新增模型"}</button>
-            </details>
+        <div className="model-dialog-backdrop" role="dialog" aria-modal="true" aria-label="切换模型">
+          <section className="model-dialog">
+            <header className="model-dialog-header">
+              <div><p className="model-dialog-eyebrow">模型设置</p><h2>切换大模型</h2><p>切换后，后续对话和新发起的审核会使用新模型；进行中的任务不受影响。</p></div>
+              <span className="model-dialog-status"><i />{modelConfig ? `已加载 ${modelConfig.allowed_models.length} 个模型` : "读取中"}</span>
+            </header>
+            <div className="model-dialog-content">
+              <p className="model-dialog-label">当前模型</p>
+              {modelConfig ? <div className="model-choice-grid" role="radiogroup" aria-label="模型">
+                {modelConfig.allowed_models.map((model) => (
+                  <label className="model-choice" key={model}>
+                    <input type="radio" name="active-model" value={model} checked={modelConfig.active_model === model} onChange={() => setModelConfig({ ...modelConfig, active_model: model })} />
+                    <span className="model-choice-card"><b>✓</b><strong>{model}</strong><small>{/flash/i.test(model) ? "响应更快，适合常规对话与合同初审。" : "适合复杂条款推理与深度审查。"}</small></span>
+                  </label>
+                ))}
+              </div> : <p className="model-dialog-loading">正在读取可用模型…</p>}
+              <details className="model-custom-details"><summary>新增自定义大模型</summary><p>API Key 仅保存到后端，普通用户无法查看。</p>
+                <div className="model-custom-grid">{([['display_name','显示名称，例如：内部模型'], ['model_id','模型 ID'], ['base_url','OpenAI 兼容接口地址'], ['api_key','API Key']] as const).map(([key, label]) => <input key={key} aria-label={label} type={key === 'api_key' ? 'password' : 'text'} placeholder={label} value={newModel[key]} onChange={(event) => setNewModel({ ...newModel, [key]: event.target.value })} />)}</div>
+                <button className="model-secondary-action" type="button" disabled={isSavingModel || !newModel.display_name || !newModel.model_id || !newModel.base_url || !newModel.api_key} onClick={() => void saveNewModel()}>{isSavingModel ? "保存中…" : "新增模型"}</button>
+              </details>
+              {modelConfigError ? <p className="model-dialog-error" role="alert">{modelConfigError}</p> : null}
+              <footer className="model-dialog-actions"><button className="model-secondary-action" type="button" onClick={() => setShowModelConfig(false)}>取消</button><button className="model-primary-action" type="button" disabled={!modelConfig || isSavingModel} onClick={() => void saveModelConfig()}>{isSavingModel ? "保存中…" : "保存并切换"}</button></footer>
+            </div>
           </section>
         </div>
       )}
@@ -2732,9 +2754,11 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
                                   {accepted ? "已应用" : "待确认"}
                                 </span>
                               </div>
-                              <span className={`evidence-chip${risk.evidence_status === "verified" ? " evidence-chip-verified" : ""}`}>
-                                {risk.evidence_status === "verified" ? "依据已核验" : "需人工核验"}
-                              </span>
+                              {!accepted ? (
+                                <span className={`evidence-chip${risk.evidence_status === "verified" ? " evidence-chip-verified" : ""}`}>
+                                  {risk.evidence_status === "verified" ? "依据已核验" : "待确认"}
+                                </span>
+                              ) : null}
                               {feedbackDecision ? (
                                 <span className={`feedback-chip feedback-chip-${feedbackDecision}`}>
                                   {feedbackDecision === "confirmed" ? "已确认风险" : feedbackDecision === "rejected" ? "已标记非风险" : "已采纳修改"}
@@ -2758,11 +2782,11 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
                                     ? "深度审查后可修改"
                                     : needsManualOriginalLocation
                                       ? canApplyAtSelectedLocation
-                                        ? "确认并应用"
+                                        ? "确认应用"
                                         : "确认定位后应用"
                                       : isMissingClause(risk.original_text)
-                                        ? "确认并补充"
-                                        : "确认并应用"}
+                                        ? "确认补充"
+                                        : "确认应用"}
                               </button>
                               {accepted && appliedModification ? (
                                 <button className="secondary-button inline-button" type="button" onClick={() => void undoRiskModification(risk, riskKey)}>
@@ -2806,7 +2830,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
                             <p className="risk-title">{isMissingClause(risk.original_text) ? "建议插入位置" : "定位原文"}</p>
                             <p>
                               {isMissingClause(risk.original_text)
-                                ? getInsertionAnchor(risk) ?? "合同中缺失该约定，暂未锁定明确插入位置，可手动选择段落。"
+                                ? getInsertionAnchor(risk, editorText) ?? "合同中缺失该约定，未能自动定位插入位置；请在左侧正文中选择要插入到哪一段后面。"
                                 : risk.original_text}
                             </p>
                           </div>
@@ -2831,7 +2855,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
                                 </div>
                               ) : null}
                               <button className="secondary-button inline-button" type="button" onClick={() => void copySuggestionToClipboard(risk)}>
-                                复制修改建议
+                                复制修订后条款
                               </button>
                             </div>
                           ) : null}
@@ -2842,7 +2866,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
                               <p>{risk.risk}</p>
                             </div>
                             <div className="suggestion-block">
-                              <p className="risk-title">{isMissingClause(risk.original_text) ? "建议补充条款" : "修改建议"}</p>
+                              <p className="risk-title">修订后条款</p>
                               <p>{cleanSuggestedContractText(risk.suggestion)}</p>
                             </div>
                           </div>

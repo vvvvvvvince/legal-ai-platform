@@ -31,3 +31,12 @@ def read_source_docx(job_id: str) -> bytes | None:
     if not path.is_file():
         return None
     return path.read_bytes()
+
+
+def delete_source_docx(job_id: str) -> None:
+    """Remove a retained source document after its review record expires."""
+    path = _source_docx_path(job_id)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass

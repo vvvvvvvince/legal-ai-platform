@@ -207,7 +207,9 @@ class DocumentPreflightCheck(BaseModel):
 class TextReviewRequest(BaseModel):
     filename: str = Field(min_length=1, max_length=255)
     contract_text: str = Field(min_length=1, max_length=400_000)
-    review_scope: list[str] = Field(min_length=1)
+    # Scope is retained only for backward-compatible clients. The server
+    # always performs the complete review baseline.
+    review_scope: list[str] = Field(default_factory=list)
 
 
 class DeepReviewSettings(BaseModel):

@@ -3,7 +3,7 @@ from io import BytesIO
 from docx import Document
 from fastapi.testclient import TestClient
 
-from app.main import app
+from app.main import FULL_REVIEW_SCOPE, app
 from app.schemas.review import ContractOverview, IntakeChatResponse, ReviewResponse
 
 
@@ -111,8 +111,9 @@ def test_intake_chat_returns_modelled_review_criteria(monkeypatch) -> None:
 
 
 def test_review_returns_structured_payload(monkeypatch) -> None:
-    def fake_review_contract_text(contract_text: str, filename: str) -> ReviewResponse:
+    def fake_review_contract_text(contract_text: str, filename: str, selected_scope: list[str]) -> ReviewResponse:
         assert "合同份数" in contract_text
+        assert selected_scope == FULL_REVIEW_SCOPE
         return ReviewResponse(
             filename=filename,
             risks=[
@@ -145,8 +146,12 @@ def test_review_returns_structured_payload(monkeypatch) -> None:
     assert response.json()["risks"][0]["item"] == "合同份数"
 
 
-def test_review_rejects_empty_or_unknown_review_scope() -> None:
-    for scope in ("[]", '["未知范围"]', "{}"):
+def test_review_accepts_empty_legacy_scope_but_rejects_unknown_scope(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.main.review_contract_text",
+        lambda contract_text, filename, selected_scope: ReviewResponse(filename=filename, risks=[]),
+    )
+    for scope, expected_status in (("[]", 200), ('["未知范围"]', 400), ("{}", 400)):
         response = client.post(
             "/api/review",
             data={"review_scope": scope},
@@ -158,10 +163,10 @@ def test_review_rejects_empty_or_unknown_review_scope() -> None:
                 )
             },
         )
-        assert response.status_code == 400
+        assert response.status_code == expected_status
 
 
-def test_review_accepts_selected_scope_and_forwards_it(monkeypatch) -> None:
+def test_review_keeps_full_coverage_when_legacy_client_sends_selected_scope(monkeypatch) -> None:
     captured = {}
 
     def fake_review(contract_text: str, filename: str, selected_scope: list[str]) -> ReviewResponse:
@@ -182,7 +187,7 @@ def test_review_accepts_selected_scope_and_forwards_it(monkeypatch) -> None:
     )
 
     assert response.status_code == 200
-    assert captured["scope"] == ["付款与发票"]
+    assert captured["scope"] == FULL_REVIEW_SCOPE
 
 
 def test_text_review_accepts_preflight_corrected_text(monkeypatch) -> None:
@@ -206,5 +211,22 @@ def test_text_review_accepts_preflight_corrected_text(monkeypatch) -> None:
     assert captured == {
         "text": "第一条 服务范围，验收。",
         "filename": "contract.docx",
-        "scope": ["付款与发票"],
+        "scope": FULL_REVIEW_SCOPE,
     }
+
+
+def test_text_review_defaults_to_full_coverage_without_scope(monkeypatch) -> None:
+    captured = {}
+
+    def fake_review(contract_text: str, filename: str, selected_scope: list[str]) -> ReviewResponse:
+        captured.update({"text": contract_text, "filename": filename, "scope": selected_scope})
+        return ReviewResponse(filename=filename, risks=[])
+
+    monkeypatch.setattr("app.main.review_contract_text", fake_review)
+    response = client.post(
+        "/api/review/text",
+        json={"filename": "contract.docx", "contract_text": "第一条 服务范围，验收。"},
+    )
+
+    assert response.status_code == 200
+    assert captured["scope"] == FULL_REVIEW_SCOPE

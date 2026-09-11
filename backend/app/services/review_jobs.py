@@ -592,6 +592,19 @@ class ReviewJobStore:
             )
             return cursor.rowcount
 
+    def list_expired_job_ids(self, retention_days: int) -> list[str]:
+        """Return terminal jobs due for cleanup without exposing their payloads."""
+        if retention_days < 0:
+            raise ValueError("retention_days must be non-negative")
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).isoformat()
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT job_id FROM review_jobs
+                   WHERE status IN ('succeeded', 'failed', 'cancelled') AND finished_at < ?""",
+                (cutoff,),
+            ).fetchall()
+        return [str(row["job_id"]) for row in rows]
+
 
 
 class ReviewJobWorker:
@@ -661,11 +674,17 @@ class ReviewJobWorker:
             heartbeat_stop.set()
             heartbeat_thread.join(timeout=self.heartbeat_interval + 0.1)
             logger.exception("Review job %s failed", job.job_id)
-            self.store.fail_job(
-                job.job_id,
-                "审查任务执行失败，请检查模型服务后重试。",
-                worker_id=worker_id,
-            )
+            try:
+                self.store.fail_job(
+                    job.job_id,
+                    "审查任务执行失败，请检查模型服务后重试。",
+                    worker_id=worker_id,
+                )
+            except KeyError:
+                # A prolonged provider call can lose its SQLite lease and be
+                # reclaimed by another worker.  Never let this stale worker
+                # crash the daemon or overwrite the newer worker's result.
+                logger.warning("Review job %s changed owner before failure handling; leaving it to the active worker.", job.job_id)
         return True
 
     def _run(self) -> None:
