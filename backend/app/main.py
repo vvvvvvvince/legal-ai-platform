@@ -1,10 +1,11 @@
 import os
 import json
 import secrets
+import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 from fastapi import Body, FastAPI, File, Form, Header, HTTPException, Request, Response, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,7 +27,7 @@ from app.schemas.review import (
     TextReviewRequest,
 )
 from app.services.docx_modifier import modify_docx_inplace, parse_modifications
-from app.services.docx_parser import extract_docx_text
+from app.services.docx_parser import extract_docx_text, validate_docx_file_bytes
 from app.services.pdf_parser import extract_pdf_document
 from app.services.knowledge_import import (
     KnowledgeImportConflict,
@@ -49,12 +50,15 @@ from app.services.request_auth import (
     reset_current_identity,
     set_current_identity,
 )
-from app.services.review_job_files import has_source_docx, read_source_docx, save_source_docx
+from app.services.review_job_files import delete_source_docx, has_source_docx, read_source_docx, save_source_docx
 from app.services.review_jobs import IdempotencyConflict, ModificationSaveResult, ReviewJob, ReviewJobStore, ReviewJobWorker, ReviewModification
+from app.services.local_review_memory import local_review_context
 
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 API_VERSION = "2026.08.18-chat-intake"
 DEFAULT_REVIEW_JOB_DB = "data/review_jobs.sqlite3"
+DEFAULT_PROVIDER_BASE_URL = os.getenv("BAILIAN_BASE_URL")
+DEFAULT_PROVIDER_API_KEY = os.getenv("DASHSCOPE_API_KEY")
 MAX_KNOWLEDGE_SNAPSHOT_BYTES = int(
     os.getenv("MAX_KNOWLEDGE_SNAPSHOT_BYTES", str(250 * 1024 * 1024))
 )
@@ -64,6 +68,12 @@ REVIEW_SCOPE_NAMES = {
     "质量与售后", "违约与责任", "解除与终止", "知识产权", "保密与数据",
     "合规与许可", "通知与送达", "争议解决", "附件与文本一致性",
 }
+FULL_REVIEW_SCOPE = [
+    "基础质量与合同框架",
+    "主体与签约权限", "合同成立与效力", "标的与价格", "付款与发票", "交付与验收",
+    "质量与售后", "违约与责任", "解除与终止", "知识产权", "保密与数据",
+    "合规与许可", "通知与送达", "争议解决", "附件与文本一致性",
+]
 PDF_QUALITY_NOTES = {
     "searchable": "PDF 文本可搜索，已完成文本提取。",
     "partial": "PDF 仅部分页面识别出文本，可能存在漏审，需要人工复核。",
@@ -71,20 +81,126 @@ PDF_QUALITY_NOTES = {
 }
 
 
+def build_reviewed_export_filename(original_filename: str, exported_at: datetime | None = None) -> str:
+    """Return a stable, human-readable filename for an exported contract."""
+    source_name = original_filename.replace("\\", "/").rsplit("/", 1)[-1].strip()
+    stem = Path(source_name).stem.strip() if source_name else ""
+    # Do not accumulate an old export date when a downloaded contract is re-exported.
+    stem = re.sub(r"^【\d{6}】\s*", "", stem)
+    stem = re.sub(r"[-_]\d{6}$", "", stem).strip() or "合同"
+    date = (exported_at or datetime.now().astimezone()).strftime("%y%m%d")
+    return f"【{date}】{stem}.docx"
+
+
+def attachment_content_disposition(filename: str) -> str:
+    """Use RFC 5987 encoding so Chinese filenames work in direct API downloads."""
+    return (
+        'attachment; filename="reviewed_contract.docx"; '
+        f"filename*=UTF-8''{quote(filename, safe='')}"
+    )
+
+
 class LoginRequest(BaseModel):
     username: str
     password: str
 
 
+class ModelConfigRequest(BaseModel):
+    model: str
+
+
+class ModelProfileCreateRequest(BaseModel):
+    display_name: str
+    model_id: str
+    base_url: str
+    api_key: str
+
+
+def bootstrap_users_from_environment(auth: AuthStore) -> None:
+    """Create the first three accounts in a fresh production volume only.
+
+    The JSON is read only from the private runtime environment, never returned
+    by an API or written to logs.  Once users exist, the value is ignored.
+    """
+    raw = os.getenv("AUTH_BOOTSTRAP_USERS_JSON", "").strip()
+    if auth.has_active_users() or not raw:
+        return
+    try:
+        entries = json.loads(raw)
+        users = [
+            (entry["username"], entry["display_name"], entry.get("phone"), entry["password"], bool(entry.get("is_admin")))
+            for entry in entries
+        ]
+        auth.replace_active_users(users)
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("AUTH_BOOTSTRAP_USERS_JSON is invalid; production startup is blocked.") from exc
+
+
+def model_profiles() -> dict[str, dict[str, str]]:
+    """Named non-default providers; values stay server-side and are never returned."""
+    base_url = os.getenv("QWEN3_8_27B_BASE_URL", "").strip()
+    api_key = os.getenv("QWEN3_8_27B_API_KEY", "").strip()
+    profiles = {"Qwen3.8-27B": {"base_url": base_url, "api_key": api_key}} if base_url and api_key else {}
+    stored = AuthStore(auth_db_path()).get_setting("custom_model_profiles")
+    try:
+        custom_profiles = json.loads(stored) if stored else []
+    except json.JSONDecodeError:
+        custom_profiles = []
+    if isinstance(custom_profiles, list):
+        for item in custom_profiles:
+            if not isinstance(item, dict):
+                continue
+            model_id, custom_url, custom_key = item.get("model_id"), item.get("base_url"), item.get("api_key")
+            if all(isinstance(value, str) and value for value in (model_id, custom_url, custom_key)):
+                profiles[model_id] = {"base_url": custom_url, "api_key": custom_key}
+    return profiles
+
+
+def allowed_models() -> list[str]:
+    return ["qwen3.7-flash", *model_profiles().keys()]
+
+
+def session_cookie_secure() -> bool:
+    """Default to secure cookies in production, with an explicit local override."""
+    explicit = os.getenv("SESSION_COOKIE_SECURE", "").strip().lower()
+    if explicit in {"1", "true", "yes", "on"}:
+        return True
+    if explicit in {"0", "false", "no", "off"}:
+        return False
+    return os.getenv("APP_ENV", "development").lower() in {"production", "prod"}
+
+
+def activate_model(model: str) -> None:
+    profile = model_profiles().get(model)
+    if profile:
+        os.environ["BAILIAN_BASE_URL"] = profile["base_url"]
+        os.environ["DASHSCOPE_API_KEY"] = profile["api_key"]
+    else:
+        if DEFAULT_PROVIDER_BASE_URL:
+            os.environ["BAILIAN_BASE_URL"] = DEFAULT_PROVIDER_BASE_URL
+        if DEFAULT_PROVIDER_API_KEY:
+            os.environ["DASHSCOPE_API_KEY"] = DEFAULT_PROVIDER_API_KEY
+    os.environ["BAILIAN_MODEL"] = model
+
+
 @asynccontextmanager
 async def review_job_lifespan(application: FastAPI):
     auth = AuthStore(auth_db_path())
+    bootstrap_users_from_environment(auth)
+    saved_model = auth.get_setting("active_chat_model")
+    if saved_model:
+        activate_model(saved_model)
     auth.cleanup_sessions()
+    auth.cleanup_operation_logs()
     if os.getenv("APP_ENV", "development").lower() in {"production", "prod"} and not auth.has_active_users():
         raise RuntimeError("No active users configured; run scripts/bootstrap_users.py before production startup.")
     store = _review_job_store()
     store.recover_running_jobs()
-    store.cleanup_expired(int(job_runtime_config()["retention_days"]))
+    retention_days = int(job_runtime_config()["retention_days"])
+    expired_job_ids = store.list_expired_job_ids(retention_days)
+    store.cleanup_expired(retention_days)
+    for job_id in expired_job_ids:
+        delete_source_docx(job_id)
     enabled = os.getenv("REVIEW_JOB_WORKER_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
     if enabled:
         worker = ReviewJobWorker(
@@ -140,7 +256,12 @@ async def attach_request_identity(request: Request, call_next):
         return JSONResponse({"detail": "请先登录。"}, status_code=status.HTTP_401_UNAUTHORIZED)
     token = set_current_identity(identity)
     try:
-        return await call_next(request)
+        response = await call_next(request)
+        # Read/poll requests are frequent during a long review.  Recording
+        # every one floods the audit log and adds avoidable SQLite contention.
+        if identity is not None and request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.url.path.startswith("/api/"):
+            store.log_operation(identity, f"{request.method} {request.url.path}", f"HTTP {response.status_code}")
+        return response
     finally:
         reset_current_identity(token)
 
@@ -226,17 +347,19 @@ def _modification_summary(
     return summary
 
 
-def _identity_payload(identity: RequestIdentity) -> dict[str, str]:
+def _identity_payload(identity: RequestIdentity) -> dict[str, object]:
     return {
         "user_id": identity.user_id,
         "username": identity.username,
+        "phone": identity.phone,
         "display_name": identity.display_name,
         "workspace_id": identity.workspace_id,
+        "is_admin": identity.is_admin,
     }
 
 
 @app.post("/api/auth/login")
-def login(payload: LoginRequest, request: Request, response: Response) -> dict[str, str]:
+def login(payload: LoginRequest, request: Request, response: Response) -> dict[str, object]:
     store = AuthStore(auth_db_path())
     client_key = request.client.host if request.client else "unknown"
     max_attempts = max(1, int(os.getenv("LOGIN_MAX_ATTEMPTS", "5")))
@@ -255,21 +378,21 @@ def login(payload: LoginRequest, request: Request, response: Response) -> dict[s
     store.clear_login_failures(payload.username, client_key)
     lifetime = max(300, int(os.getenv("SESSION_LIFETIME_SECONDS", str(8 * 3600))))
     token = store.create_session(identity.user_id, lifetime)
+    store.log_operation(identity, "登录", "登录成功")
     response.set_cookie(
         SESSION_COOKIE_NAME,
         token,
         max_age=lifetime,
         httponly=True,
         samesite="lax",
-        secure=os.getenv("APP_ENV", "development").lower() in {"production", "prod"}
-        or os.getenv("SESSION_COOKIE_SECURE", "false").lower() in {"1", "true", "yes"},
+        secure=session_cookie_secure(),
         path="/",
     )
     return _identity_payload(RequestIdentity.from_user(identity))
 
 
 @app.get("/api/auth/session")
-def current_session(request: Request) -> dict[str, str]:
+def current_session(request: Request) -> dict[str, object]:
     identity = identity_from_cookie(request.cookies.get(SESSION_COOKIE_NAME))
     if identity is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="请先登录。")
@@ -279,9 +402,80 @@ def current_session(request: Request) -> dict[str, str]:
 @app.post("/api/auth/logout")
 def logout(request: Request, response: Response) -> dict[str, str]:
     store = AuthStore(auth_db_path())
+    identity = store.get_identity(request.cookies.get(SESSION_COOKIE_NAME))
+    if identity:
+        store.log_operation(identity, "退出登录", "用户主动退出")
     store.revoke_session(request.cookies.get(SESSION_COOKIE_NAME))
     response.delete_cookie(SESSION_COOKIE_NAME, path="/")
     return {"status": "ok"}
+
+
+@app.get("/api/admin/operation-logs")
+def operation_logs(limit: int = 200) -> list[dict[str, str]]:
+    identity = require_request_identity()
+    if not identity.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅管理员可查看操作日志。")
+    return AuthStore(auth_db_path()).list_operation_logs(limit)
+
+
+@app.get("/api/admin/model-config")
+def get_model_config() -> dict[str, object]:
+    identity = require_request_identity()
+    if not identity.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅管理员可查看模型配置。")
+    active = os.getenv("BAILIAN_MODEL", "qwen-max")
+    return {"active_model": active, "allowed_models": allowed_models()}
+
+
+@app.get("/api/model")
+def current_model() -> dict[str, str]:
+    require_request_identity()
+    return {"active_model": os.getenv("BAILIAN_MODEL", "qwen-max")}
+
+
+@app.put("/api/admin/model-config")
+def update_model_config(payload: ModelConfigRequest) -> dict[str, object]:
+    identity = require_request_identity()
+    if not identity.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅管理员可切换模型。")
+    model = payload.model.strip()
+    if model not in allowed_models() or not re.fullmatch(r"[A-Za-z0-9._:-]{1,120}", model):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="模型不在允许的切换列表中。")
+    AuthStore(auth_db_path()).set_setting("active_chat_model", model)
+    activate_model(model)
+    AuthStore(auth_db_path()).log_operation(identity, "切换大模型", f"已切换为 {model}")
+    return {"active_model": model, "allowed_models": allowed_models()}
+
+
+@app.post("/api/admin/model-config/profiles")
+def add_model_profile(payload: ModelProfileCreateRequest) -> dict[str, object]:
+    identity = require_request_identity()
+    if not identity.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅管理员可新增模型。")
+    display_name = payload.display_name.strip()
+    model_id = payload.model_id.strip()
+    base_url = payload.base_url.strip().rstrip("/")
+    api_key = payload.api_key.strip()
+    parsed_url = urlparse(base_url)
+    if not display_name or len(display_name) > 80 or not re.fullmatch(r"[A-Za-z0-9._:-]{1,120}", model_id):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="模型名称或模型 ID 格式不正确。")
+    if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc or parsed_url.username or parsed_url.password:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="接口地址必须是完整的 http 或 https 地址。")
+    if len(api_key) < 8 or len(api_key) > 500:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="API Key 格式不正确。")
+    store = AuthStore(auth_db_path())
+    raw = store.get_setting("custom_model_profiles")
+    try:
+        profiles = json.loads(raw) if raw else []
+    except json.JSONDecodeError:
+        profiles = []
+    if not isinstance(profiles, list):
+        profiles = []
+    profiles = [item for item in profiles if isinstance(item, dict) and item.get("model_id") != model_id]
+    profiles.append({"display_name": display_name, "model_id": model_id, "base_url": base_url, "api_key": api_key})
+    store.set_setting("custom_model_profiles", json.dumps(profiles, ensure_ascii=False))
+    store.log_operation(identity, "新增大模型", f"已新增 {display_name}（{model_id}）")
+    return {"active_model": os.getenv("BAILIAN_MODEL", "qwen-max"), "allowed_models": allowed_models()}
 
 
 @app.get("/health")
@@ -490,6 +684,10 @@ async def upload_review_job_source_docx(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty.")
     if len(file_bytes) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Uploaded file must be 50 MB or smaller.")
+    try:
+        validate_docx_file_bytes(file_bytes)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     await run_in_threadpool(save_source_docx, job_id, file_bytes)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -514,7 +712,7 @@ async def download_review_job_source_docx(
     return StreamingResponse(
         iter([file_bytes]),
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": attachment_content_disposition(filename)},
     )
 
 
@@ -603,22 +801,18 @@ async def review_contract(
 
     contract_text, document_quality = _parse_contract_document(file_bytes, file.filename)
 
-    selected_scope = None
+    # Full coverage is a product invariant.  Keep accepting the legacy field
+    # so older clients do not fail, but never let it narrow the actual review.
     if review_scope:
         try:
             decoded_scope = json.loads(review_scope)
             if isinstance(decoded_scope, list):
-                selected_scope = list(dict.fromkeys(item for item in decoded_scope if isinstance(item, str)))
-                unknown_scopes = [item for item in selected_scope if item not in REVIEW_SCOPE_NAMES]
+                requested_scope = list(dict.fromkeys(item for item in decoded_scope if isinstance(item, str)))
+                unknown_scopes = [item for item in requested_scope if item not in REVIEW_SCOPE_NAMES]
                 if unknown_scopes:
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail="review_scope contains unsupported review topics.",
-                    )
-                if not selected_scope:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="Select at least one review topic.",
                     )
             else:
                 raise HTTPException(
@@ -631,10 +825,12 @@ async def review_contract(
                 detail="review_scope must be a JSON array.",
             )
 
-    review_kwargs = {"contract_text": contract_text, "filename": file.filename}
-    if selected_scope is not None:
-        review_kwargs["selected_scope"] = selected_scope
-    review = await run_in_threadpool(review_contract_text, **review_kwargs)
+    review = await run_in_threadpool(
+        review_contract_text,
+        contract_text=contract_text,
+        filename=file.filename,
+        selected_scope=FULL_REVIEW_SCOPE,
+    )
     review.contract_text = contract_text
     review.document_quality = document_quality
     if document_quality.status in {"partial", "scanned"}:
@@ -695,24 +891,18 @@ async def review_contract_text_stage(
 ) -> ReviewResponse:
     """Run the substantive stage against the user's preflight-corrected text."""
     require_request_identity(x_api_token, x_tenant_id)
-    selected_scope = list(dict.fromkeys(request.review_scope))
-    unknown_scopes = [item for item in selected_scope if item not in REVIEW_SCOPE_NAMES]
+    requested_scope = list(dict.fromkeys(request.review_scope))
+    unknown_scopes = [item for item in requested_scope if item not in REVIEW_SCOPE_NAMES]
     if unknown_scopes:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="review_scope contains unsupported review topics.",
         )
-    if not selected_scope:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Select at least one review topic.",
-        )
-
     review = await run_in_threadpool(
         review_contract_text,
         contract_text=request.contract_text,
         filename=request.filename,
-        selected_scope=selected_scope,
+        selected_scope=FULL_REVIEW_SCOPE,
     )
     review.contract_text = request.contract_text
     return review
@@ -779,7 +969,10 @@ async def export_reviewed_contract(
             if _review_job_store().get_job(review_job_id, identity.workspace_id) is None:
                 raise ValueError("review_job_id does not belong to this workspace")
             saved_authors = {
-                modification.modification_id: modification.actor_display_name
+                modification.modification_id: (
+                    str(modification.payload.get("editor_display_name") or "").strip()
+                    or modification.actor_display_name
+                )
                 for modification in _review_job_store().list_modifications(review_job_id, identity.workspace_id)
             }
         for modification in parsed_modifications:
@@ -812,10 +1005,8 @@ async def export_reviewed_contract(
         iter([export_result.content]),
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         headers={
-            "Content-Disposition": (
-                'attachment; filename="reviewed_contract.docx"'
-                if export_mode == "tracked"
-                else 'attachment; filename="final_contract.docx"'
+            "Content-Disposition": attachment_content_disposition(
+                build_reviewed_export_filename(file.filename)
             ),
             "X-Review-Requested-Modifications": str(export_result.requested),
             "X-Review-Applied-Modifications": str(export_result.applied),
@@ -854,4 +1045,39 @@ async def record_review_feedback(
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    # Keep human feedback separate from approved rules and SOP material. A
+    # personal-memory record is created only after an explicit second flag;
+    # neither path can update approved_rules.jsonl.
+    feedback_dir = Path(os.getenv("HUMAN_FEEDBACK_DIR", str(Path(__file__).resolve().parents[3] / "data" / "human_feedback")))
+    feedback_dir.mkdir(parents=True, exist_ok=True)
+    feedback_path = feedback_dir / "feedback.jsonl"
+    with feedback_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    if feedback.eligible_for_personal_memory and feedback.personal_memory_confirmed:
+        personal_memory_path = feedback_dir / "personal_memory.jsonl"
+        with personal_memory_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({**record, "memory_scope": "personal_only"}, ensure_ascii=False) + "\n")
     return {"status": "recorded"}
+
+
+@app.get("/api/review/history")
+async def get_local_review_history(
+    case_id: str | None = None,
+    suggestion_id: str | None = None,
+    x_api_token: str | None = Header(default=None),
+    x_tenant_id: str | None = Header(default=None),
+) -> dict[str, object]:
+    """Expose only local, traceable history metadata for human review."""
+    require_request_identity(x_api_token, x_tenant_id)
+    query = (case_id or suggestion_id or "").strip()
+    if not query:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="case_id or suggestion_id is required.")
+    context = await run_in_threadpool(local_review_context, query, limit=8)
+    matches = [case for case in context["historical_cases"] if case["case_id"] == query]
+    if not matches and case_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Historical case not found.")
+    return {
+        "query": query,
+        "historical_cases": matches or context["historical_cases"],
+        "notice": "历史案例仅反映过往审核习惯，须由人工确认，不构成正式公司规则。",
+    }

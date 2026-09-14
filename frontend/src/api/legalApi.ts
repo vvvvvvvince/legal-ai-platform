@@ -28,6 +28,7 @@ import type {
   IntakeConversationStep,
   DeepReviewFormSettings,
 } from "../domain/reviewTypes";
+import { formatApiErrorDetail } from "./errorDetails";
 export { normalizeReviewResponse } from "../domain/reviewTransforms";
 
 const unsupportedEditorCharacters = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
@@ -57,7 +58,7 @@ export async function getContractOverview(file: File): Promise<ContractOverviewR
   });
   if (!response.ok) {
     const payload = await response.json().catch(() => null);
-    throw new Error(payload?.detail ?? `Contract overview request failed with status ${response.status}.`);
+    throw new Error(formatApiErrorDetail(payload?.detail, `Contract overview request failed with status ${response.status}.`));
   }
   const payload = await response.json() as Partial<ContractOverviewResponse>;
   if (typeof payload.contract_text !== "string" || !payload.contract_text.trim() || !payload.overview) {
@@ -130,7 +131,7 @@ export async function continueIntakeChat(
   });
   if (!response.ok) {
     const payload = await response.json().catch(() => null);
-    throw new Error(payload?.detail ?? `法务助手对话请求失败（${response.status}）。`);
+    throw new Error(formatApiErrorDetail(payload?.detail, `法务助手对话请求失败（${response.status}）。`));
   }
   const payload = await response.json() as Partial<IntakeChatResponse>;
   if (typeof payload.assistant_message !== "string" || !payload.assistant_message.trim()) {
@@ -165,7 +166,7 @@ export async function continueLegalResearch(
   });
   if (!response.ok) {
     const payload = await response.json().catch(() => null);
-    throw new Error(payload?.detail ?? `法规咨询请求失败（${response.status}）。`);
+    throw new Error(formatApiErrorDetail(payload?.detail, `法规咨询请求失败（${response.status}）。`));
   }
   const payload = await response.json() as Partial<LegalResearchResponse>;
   if (typeof payload.assistant_message !== "string" || !payload.assistant_message.trim()) {

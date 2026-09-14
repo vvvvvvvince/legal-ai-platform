@@ -116,11 +116,11 @@ def test_export_uses_the_authenticated_user_not_a_client_supplied_author(monkeyp
     auth_db = tmp_path / "auth.sqlite3"
     monkeypatch.setenv("AUTH_DB", str(auth_db))
     monkeypatch.setenv("REVIEW_JOB_WORKER_ENABLED", "false")
-    AuthStore(auth_db).create_user("alice", "甲同事", "correct-password")
+    AuthStore(auth_db).create_user("alice", "甲同事", "correct-password", "13800000001")
 
     with TestClient(app) as authenticated_client:
         assert authenticated_client.post(
-            "/api/auth/login", json={"username": "alice", "password": "correct-password"}
+            "/api/auth/login", json={"username": "alice", "phone": "13800000001", "password": "correct-password"}
         ).status_code == 200
         response = authenticated_client.post(
             "/api/export",

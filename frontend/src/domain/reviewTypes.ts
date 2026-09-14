@@ -90,6 +90,16 @@ export type DeepReviewOutput = {
   settings_note: string;
 };
 
+export type LocalReviewReference = {
+  reference_type: "approved_rule" | "approved_sop" | "historical_case";
+  reference_id: string;
+  title: string;
+  source_file: string;
+  source_locator: string;
+  summary: string;
+  authority_note: string;
+};
+
 export type ContractOverview = {
   contract_type: string;
   summary: string;
@@ -166,6 +176,7 @@ export type ReviewResponse = {
   consistency_checks?: ReviewConsistencyCheck[];
   document_quality?: DocumentQuality | null;
   preflight_checks?: DocumentPreflightCheck[];
+  local_references?: LocalReviewReference[];
   deep_review?: DeepReviewOutput | null;
 };
 
@@ -173,6 +184,7 @@ export type Modification = {
   modification_id?: string;
   actor_user_id?: string;
   actor_display_name?: string;
+  editor_display_name?: string;
   item?: string;
   risk_key?: string;
   original: string;

@@ -31,6 +31,7 @@ class ReviewModificationInput(BaseModel):
     original: str = Field(min_length=1, max_length=20_000)
     modified: str = Field(max_length=20_000)
     revision_id: str | None = Field(default=None, max_length=300)
+    editor_display_name: str | None = Field(default=None, max_length=100)
     anchor_text: str | None = Field(default=None, max_length=20_000)
     insert_after_text: str | None = Field(default=None, max_length=20_000)
     paragraph_context: str | None = Field(default=None, max_length=20_000)
@@ -206,7 +207,9 @@ class DocumentPreflightCheck(BaseModel):
 class TextReviewRequest(BaseModel):
     filename: str = Field(min_length=1, max_length=255)
     contract_text: str = Field(min_length=1, max_length=400_000)
-    review_scope: list[str] = Field(min_length=1)
+    # Scope is retained only for backward-compatible clients. The server
+    # always performs the complete review baseline.
+    review_scope: list[str] = Field(default_factory=list)
 
 
 class DeepReviewSettings(BaseModel):
@@ -262,6 +265,16 @@ class DeepReviewOutput(BaseModel):
     settings_note: str = ""
 
 
+class LocalReviewReference(BaseModel):
+    reference_type: Literal["approved_rule", "approved_sop", "historical_case"]
+    reference_id: str = ""
+    title: str = ""
+    source_file: str = ""
+    source_locator: str = ""
+    summary: str = ""
+    authority_note: str = ""
+
+
 class ReviewResponse(BaseModel):
     filename: str
     contract_type: str | None = Field(default=None, description="Detected enterprise contract type")
@@ -288,6 +301,10 @@ class ReviewResponse(BaseModel):
         default_factory=list,
         description="Deterministic basic quality and contract-framework checks run before detailed review",
     )
+    local_references: list[LocalReviewReference] = Field(
+        default_factory=list,
+        description="Read-only approved-rule and historical-case sources used by hybrid review",
+    )
     deep_review: DeepReviewOutput | None = None
 
 
@@ -297,3 +314,9 @@ class ReviewFeedback(BaseModel):
     decision: Literal["confirmed", "rejected", "edited"]
     note: str = ""
     corrected_suggestion: str | None = None
+    suggestion_id: str | None = None
+    human_comment: str = ""
+    final_revision: str = ""
+    project_exception: bool = False
+    eligible_for_personal_memory: bool = False
+    personal_memory_confirmed: bool = False

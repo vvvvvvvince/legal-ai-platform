@@ -21,12 +21,14 @@ _CURRENT_IDENTITY: ContextVar["RequestIdentity | None"] = ContextVar(
 class RequestIdentity:
     user_id: str
     username: str
+    phone: str
     display_name: str
     workspace_id: str = "shared"
+    is_admin: bool = False
 
     @classmethod
     def from_user(cls, user: UserIdentity) -> "RequestIdentity":
-        return cls(user.user_id, user.username, user.display_name, user.workspace_id)
+        return cls(user.user_id, user.username, user.phone, user.display_name, user.workspace_id, user.is_admin)
 
 
 def auth_db_path() -> str:
@@ -67,4 +69,4 @@ def require_request_identity(
     workspace_id = (x_tenant_id or "shared").strip().lower()
     if not TENANT_ID_PATTERN.fullmatch(workspace_id):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid workspace identifier.")
-    return RequestIdentity("system-legacy", "legacy", "Legacy", workspace_id)
+    return RequestIdentity("system-legacy", "legacy", "", "Legacy", workspace_id)

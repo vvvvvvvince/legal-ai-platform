@@ -8,6 +8,10 @@ const utilSource = path.join(root, "src", "reviewUtils.ts");
 const utilOutput = path.join(outDir, "reviewUtils.js");
 const jobsSource = path.join(root, "src", "api", "reviewJobs.ts");
 const jobsOutput = path.join(outDir, "reviewJobs.js");
+const errorDetailsSource = path.join(root, "src", "api", "errorDetails.ts");
+// TypeScript preserves the extensionless import in reviewJobs.js. Node's ESM
+// resolver therefore needs this exact extensionless test fixture name.
+const errorDetailsOutput = path.join(outDir, "errorDetails");
 const testFile = path.join(root, "tests", "review-utils.test.mjs");
 const jobsTestFile = path.join(root, "tests", "review-job-utils.test.mjs");
 const assistantMarkTestFile = path.join(root, "tests", "legal-assistant-mark.test.mjs");
@@ -38,6 +42,16 @@ const jobsTranspiled = ts.transpileModule(jobsSourceText, {
   fileName: "reviewJobs.ts"
 });
 await writeFile(jobsOutput, jobsTranspiled.outputText, "utf8");
+
+const errorDetailsText = await readFile(errorDetailsSource, "utf8");
+const errorDetailsTranspiled = ts.transpileModule(errorDetailsText, {
+  compilerOptions: {
+    module: ts.ModuleKind.ES2022,
+    target: ts.ScriptTarget.ES2020
+  },
+  fileName: "errorDetails.ts"
+});
+await writeFile(errorDetailsOutput, errorDetailsTranspiled.outputText, "utf8");
 
 try {
   await import(pathToFileURL(testFile).href);

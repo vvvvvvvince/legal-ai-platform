@@ -16,5 +16,7 @@ dist/
 outputs/
 work/
 backend/logs/
+backend/data/
+data/
 logs/
 .pytest-runtime/

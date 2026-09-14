@@ -1,4 +1,4 @@
-import type { ReviewRisk, ReviewCoverage, ReviewConsistencyCheck, ReviewResponse, LawReference, DocumentPreflightCheck, DocumentQuality, DeepReviewOutput } from "../domain/reviewTypes";
+import type { ReviewRisk, ReviewCoverage, ReviewConsistencyCheck, ReviewResponse, LawReference, DocumentPreflightCheck, DocumentQuality, DeepReviewOutput, LocalReviewReference } from "../domain/reviewTypes";
 
 const unsupportedEditorCharacters = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
 
@@ -164,6 +164,26 @@ export function normalizeReviewResponse(payload: unknown, fallbackFilename: stri
             original_text: typeof item.original_text === "string" ? item.original_text : null,
             replacement_text: typeof item.replacement_text === "string" ? item.replacement_text : null,
             auto_fixable: item.auto_fixable === true,
+          }];
+        })
+      : [],
+    local_references: Array.isArray(source.local_references)
+      ? source.local_references.flatMap((entry): LocalReviewReference[] => {
+          if (!entry || typeof entry !== "object") return [];
+          const item = entry as Record<string, unknown>;
+          const type = item.reference_type;
+          if (
+            (type !== "approved_rule" && type !== "approved_sop" && type !== "historical_case")
+            || typeof item.title !== "string"
+          ) return [];
+          return [{
+            reference_type: type,
+            reference_id: typeof item.reference_id === "string" ? item.reference_id : "",
+            title: item.title,
+            source_file: typeof item.source_file === "string" ? item.source_file : "",
+            source_locator: typeof item.source_locator === "string" ? item.source_locator : "",
+            summary: typeof item.summary === "string" ? item.summary : "",
+            authority_note: typeof item.authority_note === "string" ? item.authority_note : "",
           }];
         })
       : [],

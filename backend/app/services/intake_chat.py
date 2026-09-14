@@ -35,18 +35,19 @@ _CRITERIA_TEXT_LIMITS = {
     "non_negotiables": 2_000,
 }
 
-INTAKE_PROMPT = """你是企业法务的审查前沟通助手。任务是先帮助用户用自然语言确定审查标准，再交给后续合同审查流程。
+INTAKE_PROMPT = """你是企业法务的审查前沟通助手。系统会固定覆盖全部常用合同审查维度，不要求用户选择或缩小审核范围。
+你的首要任务是基于合同概览、正文节选和对话，主动指出可识别的全部风险点，以及对我方可能不利、不公平或责任明显不对等的条款；风险必须说明依据，不能编造。
 你已获得合同概览和最近的对话。只能把用户明确表达的偏好、目标或底线写入 criteria；合同事实必须以概览或原文为准，不能编造。
 
 每轮必须按以下顺序处理：
 1. 先理解用户最新一句话。如果用户提出问题、要求解释、要求示例或要求展示修改方案，必须先直接回答；不得跳过用户问题而机械重复上一轮追问。
 2. 回答必须以合同概览、正文节选和已确认信息为依据。缺少依据时明确说明未知，不得虚构合同事实、法律结论或用户偏好。
 3. 可以像专业对话助手一样解释条款含义、分析利弊、比较方案并给出示例修改，但必须区分“合同已有内容”“基于用户立场的建议”和“仍待用户确认的事实”。
-4. 再判断是否仍有一个会实质影响审查方向的未知信息。确有必要时，只在回答后追问一个简短问题；不必要时不追问，不要为了推进流程强行提问。
+4. 再判断是否仍有一个会实质影响我方立场或结论的未知事实。确有必要时，只在回答后追问一个简短问题；不必要时不追问，不要为了推进流程强行提问。若我方身份未知，先给出客观风险及其对哪一方不利的分析，再询问我方是哪一方。
 5. 当前审查标准是已经确认的稳定基线。普通咨询和追问不得删除、重置或悄悄改变已有身份、目标、重点、底线和审查风格；只有用户明确表示修改、取消或纠正时才能改写。
 6. 不得逐字重复最近已经问过的问题。若用户未回答旧问题，应先回应其新问题，再用更具体、更容易回答的方式确认旧问题。
 
-遵循法务工作的第一性原则：逐步弄清我方身份、交易要实现的业务结果、最担心的损失/失败情形、不可让步条件，以及希望的谈判力度。允许用户自由表达，不把对话做成固定表单。
+遵循法务工作的第一性原则：逐步弄清我方身份、交易要实现的业务结果、最担心的损失/失败情形、不可让步条件，以及希望的谈判力度。允许用户自由表达，不把对话做成固定表单。不要询问用户“优先审核哪些范围”、不要提供审核范围选择快捷键，也不要将 focus_areas 当作可由用户配置的范围；它始终代表系统全量审查基线。
 
 当已明确我方身份，且用户至少说明一个业务目标、担忧或底线时，可以 ready_for_review=true。首次形成方案或用户明确调整方案时，简短复述审查标准并提示可以开始综合审查；此后的普通咨询应直接回答，不必每轮重复整套方案。信息尚不足时 ready_for_review=false。
 
@@ -57,21 +58,20 @@ quick_replies 规则：
 - 不要生成“其他”“自行补充”这类没有实际回答内容的空选项，用户仍可在输入框自由作答。
 
 suggested_questions 规则：
-- 根据本轮回答、合同内容和当前审核方向，预测用户接下来最可能继续询问的 2-4 个有价值问题；
-- 每项必须写成用户可以直接发送的问题，例如“这项条款对甲方最不利的地方是什么？”；点击后模型应能继续分析；
-- 建议问题不能预设合同中不存在的金额、日期、主体承诺或风险结论，也不能诱导改变已确认的整体审核方向；
-- suggested_questions 是“用户可能继续问什么”，quick_replies 是“用户如何回答 AI 当前追问”，二者不能混淆或重复。
+- 审查前沟通阶段固定返回空数组。不要提供“重点分析”“优先审核”“补充业务担忧”等快捷选项；
+- 合同开始综合审查后，系统会直接完整列出全部风险及对我方不利/不公平之处，用户在风险卡中逐项确认是否处理；
+- suggested_questions 不是审查范围选择器，不能以任何形式让用户缩小、选择或配置审查范围。
 
 只返回 JSON：
 {
   "assistant_message":"先回应用户，可进行解释和分析，再按需追问（一般不超过600字）",
   "quick_replies":["直接回答本轮问题的选项，最多4项；无追问则为空"],
-  "suggested_questions":["用户接下来可能询问的问题，2-4项"],
+  "suggested_questions":[],
   "criteria": {
     "party_role":"party_a|party_b|other|null",
     "other_party_role":"",
     "deal_priorities":["最多6项，来自用户表达"],
-    "focus_areas":["最多8项，中文短语"],
+  "focus_areas":["保留当前全量审查基线，不得要求用户选择"],
     "review_style":"protective|balanced|material_only",
     "business_context":"用户业务目标和背景的简洁归纳",
     "non_negotiables":"用户明确的不可让步条件；没有则为空",
@@ -142,6 +142,28 @@ def _clean_quick_replies(value: object) -> list[str]:
         if len(cleaned) == 4:
             break
     return cleaned
+
+
+_SCOPE_SELECTION_REPLY_TOKENS = (
+    "重点分析",
+    "深入分析",
+    "优先审核",
+    "优先审查",
+    "优先核对",
+    "审核范围",
+    "审查范围",
+    "补充业务担忧",
+    "业务担忧",
+)
+
+
+def _clean_intake_quick_replies(value: object) -> list[str]:
+    """Keep intake shortcuts for required facts, never for narrowing review coverage."""
+    return [
+        reply
+        for reply in _clean_quick_replies(value)
+        if not any(token in reply for token in _SCOPE_SELECTION_REPLY_TOKENS)
+    ]
 
 
 def _clean_assistant_message(value: str) -> str:
@@ -239,25 +261,25 @@ def _fallback_turn(request: IntakeChatRequest, reason: str | None = None) -> Int
     has_business_intent = bool(payload.business_context.strip() or payload.non_negotiables.strip() or payload.additional_notes)
     ready = bool(payload.party_role and has_business_intent)
     if not payload.party_role:
-        message = "我已阅读合同概览。请先用一句话说明：您代表甲方/采购方、乙方/供应方，还是其他角色？"
+        risks = "；".join(request.overview.warnings[:3])
+        message = "我会默认按完整合同风险范围审查，并优先标出责任不对等、权利义务失衡及可能对我方不利的条款。"
+        if risks:
+            message += f" 当前概览已提示：{risks}。"
+        message += "请确认：您代表甲方/采购方、乙方/供应方，还是其他角色？"
         quick_replies = ["我代表甲方/采购方。", "我代表乙方/供应方。", "我是业务经办人，需要兼顾交易落地与风险控制。"]
-        suggested_questions = ["这份合同的主要交易内容是什么？", "合同中有哪些关键金额和履行期限？"]
     elif not has_business_intent:
-        message = "了解。此次交易最希望实现什么结果，或最担心发生什么损失？请用日常语言说明即可。"
+        message = "我会覆盖付款、交付验收、责任赔偿、知识产权、数据保密、变更退出、违约救济和争议解决等全部风险维度。此次交易最希望实现什么结果，或最担心发生什么损失？请用日常语言说明即可。"
         quick_replies = ["确保按期交付并通过明确验收。", "控制总成本，并让付款与履约结果挂钩。", "保护数据、保密信息和交付成果权利。", "降低延期、违约和退出造成的损失。"]
-        suggested_questions = ["这份合同目前怎样约定交付和验收？", "付款条件与履约结果是否已经挂钩？"]
     elif ready:
         message = "我已记录您的立场与业务诉求。后续会把它们作为谈判偏好和审查标准，而不当作合同已约定事实。如无补充，可点击开始综合审查。"
         quick_replies = []
-        suggested_questions = ["这份合同最值得优先修改的三处是什么？", "请展示关键风险条款的具体修改方案。", "哪些约定可能导致我方承担额外损失？"]
     else:
         message = "还有没有绝对不能接受的条件，例如付款、验收、数据使用、责任或退出安排？"
         quick_replies = ["不接受默认验收或视为验收通过。", "不接受未经书面同意使用或转移我方数据。", "不接受责任明显不对等或免责范围过宽。", "目前没有明确的不可让步条件。"]
-        suggested_questions = ["当前合同里是否存在默认验收？", "责任限制和免责条款对我方是否公平？"]
     return IntakeChatResponse(
         assistant_message=message,
         quick_replies=quick_replies,
-        suggested_questions=suggested_questions,
+        suggested_questions=[],
         criteria=payload,
         ready_for_review=ready,
         source="fallback",
@@ -358,16 +380,18 @@ def continue_intake_chat(request: IntakeChatRequest) -> IntakeChatResponse:
             or request.criteria.additional_notes
         )
         ready = criteria_complete and (bool(payload.get("ready_for_review")) or previous_criteria_complete)
-        quick_replies = _clean_quick_replies(payload.get("quick_replies"))
-        suggested_questions = [
-            question
-            for question in _clean_quick_replies(payload.get("suggested_questions"))
-            if question not in quick_replies
-        ][:4]
+        quick_replies = _clean_intake_quick_replies(payload.get("quick_replies"))
+        # A model may legitimately skip quick replies when it does not ask a
+        # follow-up, but an incomplete intake should never leave the user with
+        # only a blank input box.  Reuse the deterministic step-aware options
+        # until the minimum review context is complete.
+        fallback = _fallback_turn(request)
+        if not ready and not quick_replies:
+            quick_replies = fallback.quick_replies
         return IntakeChatResponse(
             assistant_message=_clean_assistant_message(payload["assistant_message"]) or _fallback_turn(request).assistant_message,
             quick_replies=quick_replies,
-            suggested_questions=suggested_questions,
+            suggested_questions=[],
             criteria=criteria,
             ready_for_review=ready,
             source="model",

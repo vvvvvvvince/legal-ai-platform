@@ -21,7 +21,7 @@ def test_legal_research_model_answer_keeps_contract_context_optional(monkeypatch
     monkeypatch.setattr("app.services.legal_research_chat.OpenAI", lambda **kwargs: object())
     seen_context: list[str] = []
 
-    def fake_answer(client, request):
+    def fake_answer(client, request, knowledge_context=""):
         seen_context.append(request.contract_context)
         return type("Result", (), {
             "assistant_message": "这是通用法规信息，请结合现行文本核验。",

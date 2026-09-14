@@ -9,6 +9,7 @@ from openai import OpenAI
 
 from app.schemas.review import LegalResearchRequest, LegalResearchResponse
 from app.services.contract_overview import _model_failure_reason
+from app.services.fastgpt_knowledge import format_fastgpt_knowledge_for_prompt, retrieve_fastgpt_knowledge
 from app.services.openai_review import BAILIAN_DEFAULT_BASE_URL, BAILIAN_DEFAULT_MODEL, _model_content_to_text
 
 
@@ -50,7 +51,7 @@ def _fallback(request: LegalResearchRequest, reason: str | None = None) -> Legal
     )
 
 
-def _request_model_answer(client: OpenAI, request: LegalResearchRequest) -> LegalResearchResponse:
+def _request_model_answer(client: OpenAI, request: LegalResearchRequest, knowledge_context: str = "") -> LegalResearchResponse:
     conversation = [{"role": message.role, "content": message.content} for message in request.messages[-12:]]
     context = request.contract_context.strip()
     context_message = (
@@ -62,7 +63,7 @@ def _request_model_answer(client: OpenAI, request: LegalResearchRequest) -> Lega
         model=os.getenv("BAILIAN_MODEL", BAILIAN_DEFAULT_MODEL),
         messages=[
             {"role": "system", "content": LEGAL_RESEARCH_PROMPT},
-            {"role": "user", "content": context_message},
+            {"role": "user", "content": context_message + "\n\nFastGPT 只读参考资料：\n" + knowledge_context},
             *conversation,
         ],
         temperature=0.2,
@@ -88,13 +89,15 @@ def continue_legal_research_chat(request: LegalResearchRequest) -> LegalResearch
     if not api_key:
         return _fallback(request, "未配置模型访问凭据")
     try:
+        latest_question = next((item.content for item in reversed(request.messages) if item.role == "user"), "")
+        knowledge_context = format_fastgpt_knowledge_for_prompt(retrieve_fastgpt_knowledge(latest_question))
         client = OpenAI(
             api_key=api_key,
             base_url=os.getenv("BAILIAN_BASE_URL", BAILIAN_DEFAULT_BASE_URL),
             timeout=float(os.getenv("BAILIAN_LEGAL_RESEARCH_TIMEOUT_SECONDS", "45")),
             max_retries=0,
         )
-        return _request_model_answer(client, request)
+        return _request_model_answer(client, request, knowledge_context)
     except Exception as exc:
         logger.warning("Legal research model call failed: %s", exc, exc_info=True)
         return _fallback(request, _model_failure_reason(exc))

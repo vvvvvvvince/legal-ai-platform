@@ -13,9 +13,10 @@ type Props = {
   onDraftChange: (value: string) => void;
   onSend: (event?: FormEvent) => void;
   onStop: () => void;
+  activeModel: string;
 };
 
-export function IntakePanel({ contractOverview, file, isLoading, isIntakeChatLoading, intakeChatDraft, intakeChatWarning, error, isBusy, fileInputRef, onDraftChange, onSend, onStop }: Props) {
+export function IntakePanel({ contractOverview, file, isLoading, isIntakeChatLoading, intakeChatDraft, intakeChatWarning, error, isBusy, fileInputRef, onDraftChange, onSend, onStop, activeModel }: Props) {
   return (
     <div className="legal-chat-dock">
       {intakeChatWarning ? <p className="legal-chat-notice" role="status">{intakeChatWarning}</p> : null}
@@ -23,9 +24,9 @@ export function IntakePanel({ contractOverview, file, isLoading, isIntakeChatLoa
       <form className="legal-chat-composer" onSubmit={(event) => { if (contractOverview) { onSend(event); return; } event.preventDefault(); if (intakeChatDraft.trim()) onSend(); else if (!file) fileInputRef.current?.click(); }}>
         <textarea value={intakeChatDraft} maxLength={2000} disabled={isIntakeChatLoading || isLoading} onChange={(event: ChangeEvent<HTMLTextAreaElement>) => onDraftChange(event.target.value)} onKeyDown={(event) => { if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing || !intakeChatDraft.trim()) return; event.preventDefault(); onSend(); }} placeholder={contractOverview ? "告诉 AI 您的立场、业务目标、顾虑，或直接查询相关法规…" : file ? "正在自动读取合同…" : "咨询法规、法条或合同问题；也可通过左侧上传文件"} />
         <div className="legal-chat-composer-actions">
-          <div className="legal-chat-composer-left-actions">
-            <button className="legal-chat-attach" type="button" disabled={isBusy} onClick={() => fileInputRef.current?.click()} aria-label="上传文件" title="上传文件"><span className="legal-chat-attach-icon" aria-hidden="true" /></button>
-          </div>
+          <button className="legal-chat-attach" type="button" disabled={isBusy} onClick={() => fileInputRef.current?.click()} aria-label="上传文件" title="上传文件"><span className="legal-chat-attach-icon" aria-hidden="true" /></button>
+          <div className="legal-chat-composer-corner-actions">
+            <span title="当前使用的大模型" className="legal-chat-active-model">模型：{activeModel}</span>
           <button
             className={`legal-chat-send${isBusy ? " legal-chat-send-stop" : ""}`}
             type={isBusy ? "button" : "submit"}
@@ -36,6 +37,7 @@ export function IntakePanel({ contractOverview, file, isLoading, isIntakeChatLoa
           >
             <span className="legal-chat-send-glyph" aria-hidden="true">{isBusy ? "■" : "↑"}</span>
           </button>
+          </div>
         </div>
       </form>
       <div className="legal-chat-dock-footer"><span>支持 DOCX / PDF，最大 50MB · 合同内容仅用于本次审查</span></div>

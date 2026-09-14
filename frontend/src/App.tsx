@@ -5,7 +5,7 @@ import Color from "@tiptap/extension-color";
 import Highlight from "@tiptap/extension-highlight";
 import { TextStyle } from "@tiptap/extension-text-style";
 import Underline from "@tiptap/extension-underline";
-import { ChangeEvent, FormEvent, type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, FormEvent, type CSSProperties, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   applySavedModifications,
   getParagraphMatchScore,
@@ -14,9 +14,11 @@ import {
 } from "./reviewUtils";
 import { useReviewWorkflow } from "./hooks/useReviewWorkflow";
 import { useAuth } from "./hooks/useAuth";
+import { addModelProfile, getCurrentModel, getModelConfig, getOperationLogs, updateModelConfig, type ModelConfig, type ModelProfileInput, type OperationLog } from "./api/authApi";
 import { apiHeaders, continueIntakeChat, continueLegalResearch, getContractOverview, isLegalResearchQuestion } from "./api/legalApi";
 import { downloadReviewJobSourceDocx, getReviewJob, listReviewModifications, revertReviewModification, saveReviewModification } from "./api/reviewJobs";
 import { normalizeReviewResponse } from "./domain/reviewTransforms";
+import { formatApiErrorDetail } from "./api/errorDetails";
 import { ReviewJobStatus } from "./features/review/ReviewJobStatus";
 import { ReviewRecordsPanel } from "./features/review/ReviewRecordsPanel";
 import { EditorPanel } from "./features/editor/EditorPanel";
@@ -27,11 +29,27 @@ import { ReviewPanel } from "./features/review/ReviewPanel";
 
 import type { RiskLevel, RiskFilter, LawReference, ReviewRisk, ReviewCoverage, ReviewConsistencyCheck, DocumentQuality, DocumentPreflightCheck, PartyRole, ReviewStyle, DeepReviewSettings, DeepReviewOutput, ContractOverview, ContractOverviewResponse, IntakeChatMessage, IntakeReviewCriteria, IntakeChatResponse, LegalResearchResponse, ReviewResponse, Modification, FeedbackDecision, PreflightDecision, ParagraphOption, RiskWithKey, RiskLocationCandidate, ReviewStage, IntakeConversationStep, DeepReviewFormSettings } from "./domain/reviewTypes";
 
+// These are always available after a contract is read. They are intentionally
+// independent from a model reply so the user never loses review controls when
+// the model does not ask a follow-up question or returns a partial response.
+const standardReviewAngles = [
+  "价格与付款",
+  "交付与验收",
+  "责任与赔偿",
+  "保密与数据安全",
+  "知识产权",
+  "变更与解除",
+  "违约与救济",
+  "争议解决",
+];
+
+const defaultFocusAreas = [...standardReviewAngles];
+
 const emptyIntakeCriteria: IntakeReviewCriteria = {
   party_role: null,
   other_party_role: "",
   deal_priorities: [],
-  focus_areas: [],
+  focus_areas: [...defaultFocusAreas],
   review_style: "protective",
   business_context: "",
   non_negotiables: "",
@@ -43,20 +61,26 @@ function LoginScreen({ onLogin, error }: { onLogin: (username: string, password:
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
+  const [passwordVisible, setPasswordVisible] = useState(false);
   async function submit(event: FormEvent) {
     event.preventDefault();
     setBusy(true);
     try { await onLogin(username, password); } finally { setBusy(false); }
   }
   return (
-    <main style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: "#f7f8fa" }}>
-      <form onSubmit={submit} style={{ width: "min(360px, calc(100vw - 40px))", padding: 28, borderRadius: 20, background: "white", boxShadow: "0 18px 50px rgba(15,23,42,.10)" }}>
-        <h1 style={{ marginTop: 0 }}>AI 法务助手</h1>
-        <p style={{ color: "#64748b" }}>登录共享合同工作区</p>
-        <input aria-label="用户名" value={username} onChange={(event) => setUsername(event.target.value)} placeholder="用户名" autoComplete="username" style={{ width: "100%", boxSizing: "border-box", padding: "11px 12px", marginBottom: 10, border: "1px solid #d9dee7", borderRadius: 10 }} />
-        <input aria-label="密码" type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="密码" autoComplete="current-password" style={{ width: "100%", boxSizing: "border-box", padding: "11px 12px", marginBottom: 14, border: "1px solid #d9dee7", borderRadius: 10 }} />
-        {error && <p role="alert" style={{ color: "#b42318", fontSize: 13 }}>{error}</p>}
-        <button type="submit" disabled={busy || !username || !password} style={{ width: "100%", padding: "11px 12px", border: 0, borderRadius: 10, background: "#1f2937", color: "white", cursor: "pointer" }}>{busy ? "登录中…" : "登录"}</button>
+    <main className="login-minimal-page">
+      <form className="login-minimal-panel" onSubmit={submit}>
+        <h1>欢迎使用 AI 法务助手</h1>
+        <p className="login-minimal-subtitle">合同审查与法规知识服务平台</p>
+        <label htmlFor="login-username">用户名</label>
+        <input id="login-username" aria-label="用户名" value={username} onChange={(event) => setUsername(event.target.value)} placeholder="请输入用户名" autoComplete="username" />
+        <label htmlFor="login-password">密码</label>
+        <div className="login-minimal-password">
+          <input id="login-password" aria-label="密码" type={passwordVisible ? "text" : "password"} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="请输入密码" autoComplete="current-password" />
+          <button type="button" onClick={() => setPasswordVisible((visible) => !visible)} aria-label={passwordVisible ? "隐藏密码" : "显示密码"}>{passwordVisible ? "隐藏" : "显示"}</button>
+        </div>
+        {error && <p className="login-minimal-error" role="alert">{error}</p>}
+        <button className="login-minimal-submit" type="submit" disabled={busy || !username || !password}>{busy ? "登录中…" : "登录"}</button>
       </form>
     </main>
   );
@@ -244,6 +268,10 @@ function getErrorMessage(error: unknown) {
 
     if (error.message.includes("DASHSCOPE_API_KEY")) {
       return "百炼 API Key 未配置或未进入容器，请检查 backend/.env 后重启后端服务。";
+    }
+
+    if (normalizedMessage.includes("string should have at most 300 characters")) {
+      return "系统保存修改记录时的标识过长。请刷新页面后重新执行该项修改；合同正文与审查结果不会丢失。";
     }
 
     if (normalizedMessage.includes("could not be located exactly")) {
@@ -583,8 +611,26 @@ function normalizeParagraphs(text: string): ParagraphOption[] {
   }));
 }
 
-function getInsertionAnchor(risk: ReviewRisk): string | null {
-  return risk.insert_after_text?.trim() || risk.anchor_text?.trim() || null;
+function getInsertionAnchor(risk: ReviewRisk, contractText = ""): string | null {
+  const rawAnchor = risk.insert_after_text?.trim() || risk.anchor_text?.trim() || "";
+  const paragraphReference = /^P(\d{1,5})$/iu.exec(rawAnchor);
+  if (!paragraphReference) {
+    return rawAnchor || null;
+  }
+
+  // P093 is an internal, model-facing paragraph ID. Resolve it to the real
+  // contract paragraph whenever possible; never expose the raw ID to users.
+  const paragraph = textToParagraphs(contractText)[Number(paragraphReference[1]) - 1]?.trim();
+  return paragraph || null;
+}
+
+function cleanSuggestedContractText(suggestion: string) {
+  // This field is displayed and written as final contract language. Providers
+  // occasionally add an explanatory prefix; never show or write it.
+  return suggestion
+    .trim()
+    .replace(/^(?:修改建议|修订建议|建议修改|建议补充|建议调整|建议|修改|修订|调整)(?:内容|条款|如下)?(?:为|如下)?\s*[：:]\s*/u, "")
+    .trim();
 }
 
 function findUniqueExactMatch(text: string, query: string): { from: number; to: number } | null {
@@ -602,7 +648,7 @@ function findUniqueExactMatch(text: string, query: string): { from: number; to: 
 
 function findRiskLocationCandidates(text: string, risk: ReviewRisk): RiskLocationCandidate[] {
   const query = risk.original_text.trim();
-  const anchor = getInsertionAnchor(risk) ?? "";
+  const anchor = getInsertionAnchor(risk, text) ?? "";
   const paragraphs = textToParagraphs(text);
   const candidates: RiskLocationCandidate[] = [];
   let from = 0;
@@ -643,7 +689,20 @@ function findRiskLocationCandidates(text: string, risk: ReviewRisk): RiskLocatio
 }
 
 function getRiskKey(risk: ReviewRisk) {
-  return `${risk.item}\u0000${risk.original_text}\u0000${risk.suggestion}`;
+  // This key is sent to the shared modification API, where identifiers are
+  // deliberately bounded. Do not use the complete clause text as an ID: a
+  // single long clause can exceed that limit even though its content itself is
+  // valid and must still be saved in full in `original` and `modified`.
+  const source = `${risk.item}\u0000${risk.original_text}\u0000${risk.suggestion}`;
+  const hash = (seed: number, reverse = false) => {
+    let value = seed;
+    for (let index = 0; index < source.length; index += 1) {
+      const character = source.charCodeAt(reverse ? source.length - 1 - index : index);
+      value = Math.imul(value ^ character, 0x01000193);
+    }
+    return (value >>> 0).toString(36);
+  };
+  return `risk-${hash(0x811c9dc5)}-${hash(0x9e3779b9, true)}`;
 }
 
 function isRiskModification(modification: Modification, risk: ReviewRisk, riskKey: string) {
@@ -772,7 +831,7 @@ async function exportReviewedContract(file: File, modifications: Modification[],
 
   if (!response.ok) {
     const payload = await response.json().catch(() => null);
-    throw new Error(payload?.detail ?? `Export request failed with status ${response.status}.`);
+    throw new Error(formatApiErrorDetail(payload?.detail, `Export request failed with status ${response.status}.`));
   }
 
   return {
@@ -800,7 +859,7 @@ async function recordReviewFeedback(
   });
   if (!response.ok) {
     const payload = await response.json().catch(() => null);
-    throw new Error(payload?.detail ?? "复核反馈记录失败。");
+    throw new Error(formatApiErrorDetail(payload?.detail, "复核反馈记录失败。"));
   }
 }
 
@@ -813,6 +872,21 @@ function downloadBlob(blob: Blob, filename: string) {
   link.click();
   link.remove();
   URL.revokeObjectURL(url);
+}
+
+function buildReviewedExportFilename(originalFilename: string, exportedAt = new Date()) {
+  const sourceName = originalFilename.split(/[\\/]/).pop() || "合同";
+  const extensionIndex = sourceName.lastIndexOf(".");
+  let stem = extensionIndex > 0 ? sourceName.slice(0, extensionIndex) : sourceName;
+
+  // Re-exporting a previously exported file should refresh the date instead of nesting prefixes.
+  stem = stem.replace(/^【\d{6}】\s*/, "").replace(/[-_]\d{6}$/, "").trim() || "合同";
+  const date = [
+    String(exportedAt.getFullYear()).slice(-2),
+    String(exportedAt.getMonth() + 1).padStart(2, "0"),
+    String(exportedAt.getDate()).padStart(2, "0"),
+  ].join("");
+  return `【${date}】${stem}.docx`;
 }
 
 export default function App() {
@@ -857,7 +931,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
     timeline_urgency: "",
     counterparty_context: "",
     deal_priorities: [],
-    focus_areas: [],
+    focus_areas: [...defaultFocusAreas],
     review_style: "protective",
     contract_type: "",
     special_requirements: [],
@@ -876,6 +950,44 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [readerPanelHeight, setReaderPanelHeight] = useState<number | null>(null);
   const [showReviewRecords, setShowReviewRecords] = useState(false);
+  const [showOperationLogs, setShowOperationLogs] = useState(false);
+  const [operationLogs, setOperationLogs] = useState<OperationLog[]>([]);
+  const [operationLogError, setOperationLogError] = useState<string | null>(null);
+  const [showModelConfig, setShowModelConfig] = useState(false);
+  const [modelConfig, setModelConfig] = useState<ModelConfig | null>(null);
+  const [modelConfigError, setModelConfigError] = useState<string | null>(null);
+  const [isSavingModel, setIsSavingModel] = useState(false);
+  const [activeModel, setActiveModel] = useState("加载中…");
+  const [newModel, setNewModel] = useState<ModelProfileInput>({ display_name: "", model_id: "", base_url: "", api_key: "" });
+
+  const openOperationLogs = useCallback(async () => {
+    setShowOperationLogs(true);
+    setOperationLogError(null);
+    try {
+      setOperationLogs(await getOperationLogs());
+    } catch (reason) {
+      setOperationLogError(reason instanceof Error ? reason.message : "无法读取操作日志。");
+    }
+  }, []);
+  const openModelConfig = useCallback(async () => {
+    setShowModelConfig(true); setModelConfigError(null);
+    try { setModelConfig(await getModelConfig()); }
+    catch (reason) { setModelConfigError(reason instanceof Error ? reason.message : "无法读取模型配置。"); }
+  }, []);
+  const saveModelConfig = useCallback(async () => {
+    if (!modelConfig) return;
+    setIsSavingModel(true); setModelConfigError(null);
+    try { const next = await updateModelConfig(modelConfig.active_model); setModelConfig(next); setActiveModel(next.active_model); }
+    catch (reason) { setModelConfigError(reason instanceof Error ? reason.message : "模型切换失败。"); }
+    finally { setIsSavingModel(false); }
+  }, [modelConfig]);
+  const saveNewModel = useCallback(async () => {
+    setIsSavingModel(true); setModelConfigError(null);
+    try { const next = await addModelProfile(newModel); setModelConfig(next); setNewModel({ display_name: "", model_id: "", base_url: "", api_key: "" }); }
+    catch (reason) { setModelConfigError(reason instanceof Error ? reason.message : "新增模型失败。"); }
+    finally { setIsSavingModel(false); }
+  }, [newModel]);
+  useEffect(() => { void getCurrentModel().then(setActiveModel).catch(() => setActiveModel("暂不可用")); }, []);
   const [recoveringJobId, setRecoveringJobId] = useState<string | null>(null);
   const [modificationConflict, setModificationConflict] = useState<string | null>(null);
   const syncingEditorRef = useRef(false);
@@ -883,6 +995,14 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
   // intake and deep-review calls keep the session number they started with so
   // an older response can never overwrite a newer contract's workspace.
   const workflowEpochRef = useRef(0);
+
+  // Measure as soon as the document frame mounts. This gives the result pane
+  // a fixed height in its very first visible layout, rather than after a
+  // collapse/expand interaction or a later ResizeObserver callback.
+  const setReaderPanelNode = useCallback((node: HTMLElement | null) => {
+    readerPanelRef.current = node;
+    if (node) setReaderPanelHeight(Math.ceil(node.getBoundingClientRect().height));
+  }, []);
 
   useEffect(() => {
     if (reviewStage !== "modification" || !activeJob?.job_id) return;
@@ -964,6 +1084,15 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
     });
   }
 
+  function setModificationEditorName(modification: Modification, name: string, persist = false) {
+    const editorDisplayName = name.trim() || auth.identity?.display_name || "当前用户";
+    const updated = { ...modification, editor_display_name: editorDisplayName };
+    setModifications((previous) => previous.map((item) => (
+      isSameModification(item, modification) ? updated : item
+    )));
+    if (persist) saveModificationInBackground(updated);
+  }
+
   const sortedRisks = useMemo(() => {
     return [...(review?.risks ?? [])].sort((left, right) => levelOrder[left.level] - levelOrder[right.level]);
   }, [review]);
@@ -973,11 +1102,6 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
     () => contractOverview ? getIntakeRecommendations(contractOverview.overview) : null,
     [contractOverview],
   );
-  const quickFocusOptions = useMemo(() => {
-    const recommended = intakeRecommendations?.focus ?? [];
-    const selected = deepReviewSettings.focus_areas;
-    return Array.from(new Set([...recommended, ...selected, "价格与付款", "交付与验收", "责任与赔偿"])).slice(0, 4);
-  }, [deepReviewSettings.focus_areas, intakeRecommendations]);
   const intakeInstructionSummary = useMemo(() => {
     const parts = [
       deepReviewSettings.party_role === "party_a" ? "以甲方/采购方立场" : deepReviewSettings.party_role === "party_b" ? "以乙方/供应商立场" : deepReviewSettings.party_role === "other" ? `以${deepReviewSettings.other_party_role || "自定义角色"}立场` : "待确认我方立场",
@@ -1050,7 +1174,10 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
     return () => cancelAnimationFrame(frame);
   }, [contractOverview, file, intakeMessages, intakeReadyForReview, isIntakeChatLoading, isLoading, review]);
 
-  useEffect(() => {
+  // Synchronize the right result frame with the left document frame before
+  // paint. This prevents a long result list from briefly stretching the page
+  // while the document editor or its export bar is being updated.
+  useLayoutEffect(() => {
     const panel = readerPanelRef.current;
     if (!panel || typeof ResizeObserver === "undefined") return;
 
@@ -1062,7 +1189,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
     observer.observe(panel);
     updateHeight();
     return () => observer.disconnect();
-  }, [review, editorNotice, error]);
+  }, [review, editorNotice, error, editorText, modifications.length]);
 
   function clearEditorHighlight() {
     if (highlightedParagraphRef.current) {
@@ -1152,7 +1279,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
 
           const exactMatches = risksWithKeys.filter((riskEntry) => {
             const candidate = isMissingClause(riskEntry.risk.original_text)
-              ? getInsertionAnchor(riskEntry.risk) ?? ""
+              ? getInsertionAnchor(riskEntry.risk, editorText) ?? ""
               : riskEntry.risk.original_text;
             return Boolean(candidate && paragraphText.includes(candidate) && findUniqueExactMatch(editorText, candidate));
           });
@@ -1228,7 +1355,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
       timeline_urgency: "",
       counterparty_context: "",
       deal_priorities: [],
-      focus_areas: [],
+      focus_areas: [...defaultFocusAreas],
       review_style: "protective",
       contract_type: "",
       special_requirements: [],
@@ -1408,7 +1535,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
   }
 
   function locateRiskInEditor(risk: ReviewRisk) {
-    const candidate = isMissingClause(risk.original_text) ? getInsertionAnchor(risk) ?? "" : risk.original_text;
+    const candidate = isMissingClause(risk.original_text) ? getInsertionAnchor(risk, editorText) ?? "" : risk.original_text;
     if (!candidate) {
       return false;
     }
@@ -1453,7 +1580,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
     revealEditorSelection(candidate.from + candidate.selectionFrom + 1, candidate.from + candidate.selectionTo + 1);
     setEditorNotice(
       candidate.exactOriginal
-        ? `已确认“${risk.item}”的候选原文。现在可以在该段引用修改建议。`
+        ? `已确认“${risk.item}”的候选原文。现在可以直接确认应用修订。`
         : `已定位到“${risk.item}”的可能段落。该段仅供核对，不会自动替换相似文字。`
     );
     setError(null);
@@ -1462,6 +1589,11 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
   function applyMissingSuggestion(risk: ReviewRisk, riskKey: string, anchorText: string | null) {
     if (!editor) {
       setError("编辑器尚未准备好，请稍后重试。");
+      return;
+    }
+    const suggestion = cleanSuggestedContractText(risk.suggestion);
+    if (!suggestion) {
+      setError("该建议没有可写入合同的条款文本，请先手动编辑后再应用。");
       return;
     }
 
@@ -1480,10 +1612,10 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
     const nextParagraphs = textToParagraphs(currentText);
     const insertAtIndex = anchorMeta ? anchorMeta.index + 1 : nextParagraphs.length;
     const revisionId = `risk-${riskKey}`;
-    nextParagraphs.splice(insertAtIndex, 0, risk.suggestion);
+    nextParagraphs.splice(insertAtIndex, 0, suggestion);
 
     const nextHtmlParagraphs = [...htmlParagraphs];
-    nextHtmlParagraphs.splice(insertAtIndex, 0, buildInsertedParagraphHtml(risk.suggestion, revisionId));
+    nextHtmlParagraphs.splice(insertAtIndex, 0, buildInsertedParagraphHtml(suggestion, revisionId));
 
     editor.commands.setContent(nextHtmlParagraphs.join(""));
     setEditorText(nextParagraphs.join("\n"));
@@ -1498,7 +1630,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
       item: risk.item,
       risk_key: riskKey,
       original: MISSING_SENTINEL,
-      modified: risk.suggestion,
+      modified: suggestion,
       revision_id: revisionId,
       anchor_text: risk.anchor_text ?? null,
       insert_after_text: anchorText ?? risk.insert_after_text ?? risk.anchor_text ?? null
@@ -1508,15 +1640,20 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
       modification
     ]);
     saveModificationInBackground(modification);
-    void submitFeedback(risk, riskKey, "edited", risk.suggestion);
+    void submitFeedback(risk, riskKey, "edited", suggestion);
 
     const insertedOffset = nextParagraphs.slice(0, insertAtIndex).join("\n").length + (insertAtIndex > 0 ? 1 : 0);
-    revealEditorSelection(Math.max(1, insertedOffset + 1), Math.max(1, insertedOffset + risk.suggestion.length + 1));
+    revealEditorSelection(Math.max(1, insertedOffset + 1), Math.max(1, insertedOffset + suggestion.length + 1));
   }
 
   function applySuggestionAtSelectedLocation(risk: ReviewRisk, riskKey: string, candidate: RiskLocationCandidate) {
     if (!editor || !candidate.exactOriginal) {
       setError("请先选择一段包含完整原文的候选条款；相似匹配只能用于定位，不能自动改写。");
+      return;
+    }
+    const suggestion = cleanSuggestedContractText(risk.suggestion);
+    if (!suggestion) {
+      setError("该建议没有可写入合同的条款文本，请先手动编辑后再应用。");
       return;
     }
 
@@ -1534,7 +1671,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
       return;
     }
 
-    const nextParagraph = paragraphText.slice(0, index) + risk.suggestion + paragraphText.slice(index + original.length);
+    const nextParagraph = paragraphText.slice(0, index) + suggestion + paragraphText.slice(index + original.length);
     const nextText = [...paragraphs.slice(0, candidate.paragraphIndex), nextParagraph, ...paragraphs.slice(candidate.paragraphIndex + 1)].join("\n");
     const htmlParagraphs = getHtmlParagraphs(editor.getHTML());
     if (!htmlParagraphs[candidate.paragraphIndex]) {
@@ -1542,7 +1679,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
       return;
     }
     const revisionId = `risk-${riskKey}`;
-    htmlParagraphs[candidate.paragraphIndex] = buildReplacementDiffHtml(paragraphText, original, risk.suggestion, index, revisionId);
+    htmlParagraphs[candidate.paragraphIndex] = buildReplacementDiffHtml(paragraphText, original, suggestion, index, revisionId);
     editor.commands.setContent(htmlParagraphs.join(""));
     setEditorText(nextText);
     setSelectedRiskLocations((previous) => {
@@ -1551,12 +1688,12 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
       return next;
     });
     setError(null);
-    setEditorNotice(`已在您确认的段落中引用“${risk.item}”的修改建议。`);
+    setEditorNotice(`已在您确认的段落中应用“${risk.item}”的修订。`);
     const modification: Modification = {
       item: risk.item,
       risk_key: riskKey,
       original,
-      modified: risk.suggestion,
+      modified: suggestion,
       revision_id: revisionId,
       anchor_text: risk.anchor_text ?? null,
       insert_after_text: risk.insert_after_text ?? null,
@@ -1567,8 +1704,8 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
       modification
     ]);
     saveModificationInBackground(modification);
-    void submitFeedback(risk, riskKey, "edited", risk.suggestion);
-    revealEditorSelection(Math.max(1, candidate.from + index + 1), Math.max(1, candidate.from + index + risk.suggestion.length + 1));
+    void submitFeedback(risk, riskKey, "edited", suggestion);
+    revealEditorSelection(Math.max(1, candidate.from + index + 1), Math.max(1, candidate.from + index + suggestion.length + 1));
   }
 
   function applySuggestion(risk: ReviewRisk, riskKey: string) {
@@ -1579,10 +1716,15 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
 
     const missing = isMissingClause(risk.original_text);
     const currentText = editorText;
+    const suggestion = cleanSuggestedContractText(risk.suggestion);
+    if (!suggestion) {
+      setError("该建议没有可写入合同的条款文本，请先手动编辑后再应用。");
+      return;
+    }
     setActiveRiskKey(riskKey);
 
     if (missing) {
-      const anchor = getInsertionAnchor(risk) ?? "";
+      const anchor = getInsertionAnchor(risk, currentText) ?? "";
       const anchorMatch = anchor ? findUniqueExactMatch(currentText, anchor) : null;
 
       if (anchorMatch) {
@@ -1617,7 +1759,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
     }
 
     const nextText =
-      currentText.slice(0, originalIndex) + risk.suggestion + currentText.slice(originalIndex + risk.original_text.length);
+      currentText.slice(0, originalIndex) + suggestion + currentText.slice(originalIndex + risk.original_text.length);
     const currentHtml = editor.getHTML();
     const htmlParagraphs = getHtmlParagraphs(currentHtml);
     const nextHtmlParagraphs = [...htmlParagraphs];
@@ -1625,7 +1767,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
     nextHtmlParagraphs[paragraphMeta.index] = buildReplacementDiffHtml(
       paragraphMeta.text,
       risk.original_text,
-      risk.suggestion,
+      suggestion,
       undefined,
       revisionId,
     );
@@ -1638,7 +1780,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
       item: risk.item,
       risk_key: riskKey,
       original: risk.original_text,
-      modified: risk.suggestion,
+      modified: suggestion,
       revision_id: revisionId,
       anchor_text: risk.anchor_text ?? null,
       insert_after_text: risk.insert_after_text ?? null,
@@ -1649,9 +1791,9 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
       modification
     ]);
     saveModificationInBackground(modification);
-    void submitFeedback(risk, riskKey, "edited", risk.suggestion);
+    void submitFeedback(risk, riskKey, "edited", suggestion);
 
-    revealEditorSelection(Math.max(1, originalIndex + 1), Math.max(1, originalIndex + risk.suggestion.length + 1));
+    revealEditorSelection(Math.max(1, originalIndex + 1), Math.max(1, originalIndex + suggestion.length + 1));
   }
 
   async function undoRiskModification(risk: ReviewRisk, riskKey: string) {
@@ -1699,22 +1841,6 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
     setModifications((previous) => previous.filter((item) => !isRiskModification(item, risk, riskKey)));
     setEditorNotice(`已撤销“${risk.item}”的系统修改；其他已应用内容保持不变。`);
     setError(null);
-  }
-
-  function toggleDeepSettingOption(field: "deal_priorities" | "focus_areas" | "special_requirements", option: string) {
-    setDeepReviewSettings((current) => {
-      const selected = current[field];
-      const limit = field === "deal_priorities" ? 6 : 8;
-      if (!selected.includes(option) && selected.length >= limit) {
-        setError(`“${field === "deal_priorities" ? "交易目标" : field === "focus_areas" ? "重点关注" : "不可让步事项"}”最多选择 ${limit} 项，请先取消不适用的选项。`);
-        return current;
-      }
-      const next = selected.includes(option)
-        ? selected.filter((item) => item !== option)
-        : [...selected, option];
-      setError(null);
-      return { ...current, [field]: next };
-    });
   }
 
   function applyScenarioPreset(preset: typeof scenarioPresets[number]) {
@@ -1838,7 +1964,22 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
       }].slice(-12);
       setIntakeMessages(nextMessages);
       setIntakeCriteria(response.criteria);
-      setDeepReviewSettings(criteriaToDeepReviewSettings(response.criteria, overview.overview));
+      // Review coverage is fixed to the full standard set. Model suggestions
+      // must not narrow it or turn it into a user-managed scope selector.
+      setDeepReviewSettings((current) => {
+        const next = criteriaToDeepReviewSettings(response.criteria, overview.overview);
+        return {
+          ...next,
+          focus_areas: Array.from(new Set([
+            ...current.focus_areas.filter((item) => item !== "全部"),
+            ...next.focus_areas,
+          ])).slice(0, 8),
+          special_requirements: Array.from(new Set([
+            ...current.special_requirements,
+            ...next.special_requirements,
+          ])).slice(0, 8),
+        };
+      });
       setIntakeReadyForReview(response.ready_for_review);
       setIntakeChatWarning(response.warning ?? null);
       setError(null);
@@ -2028,23 +2169,16 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
         throw new Error("深度审查未返回完整的审查说明，系统未开放修改与导出。");
       }
 
-      const autoApplied = applyPreciselyLocatedChanges(
-        result.contract_text ?? contractOverview.contract_text,
-        result.preflight_checks ?? [],
-        result.risks,
-      );
-      pendingRevisionHtmlRef.current = autoApplied.revisionHtml;
-      setReview({ ...result, contract_text: result.contract_text ?? contractOverview.contract_text, manual_review_required: true });
+      const sourceText = result.contract_text ?? contractOverview.contract_text;
+      // Review results must remain suggestions until a reviewer explicitly
+      // confirms an individual change.  Never mutate the contract on arrival.
+      pendingRevisionHtmlRef.current = null;
+      setReview({ ...result, contract_text: sourceText, manual_review_required: true });
       setContractOverview(null);
-      setModifications(autoApplied.modifications);
-      for (const modification of autoApplied.modifications) {
-        saveModificationInBackground(modification, completedJob.job_id);
-      }
-      setEditorText(autoApplied.correctedText);
+      setModifications([]);
+      setEditorText(sourceText);
       setReviewStage("modification");
-      const reviewNote = autoApplied.modifications.length
-        ? `综合审查已完成；已自动定位并写入 ${autoApplied.modifications.length} 处可精确匹配的修改。右侧可逐项撤销；未唯一定位的建议保留为人工确认。`
-        : "综合审查已完成。未发现可唯一定位的自动修改；请在右侧确认候选段落后再处理建议。";
+      const reviewNote = "综合审查已完成。所有审核意见均保留为待确认建议；系统不会自动修改合同正文。请逐项定位、核对后再确认应用。";
       setEditorNotice(sourceDocxWarning ? `${reviewNote} ${sourceDocxWarning}` : reviewNote);
       if (sourceDocxWarning) setError(sourceDocxWarning);
     } catch (reviewError) {
@@ -2089,7 +2223,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
 
   async function copySuggestionToClipboard(risk: ReviewRisk) {
     try {
-      await navigator.clipboard.writeText(risk.suggestion);
+      await navigator.clipboard.writeText(cleanSuggestedContractText(risk.suggestion));
       setEditorNotice(`已复制“${risk.item}”的修改建议。请在确认对应原文后手动粘贴或编辑。`);
     } catch {
       setError("无法复制修改建议。请直接从右侧卡片选择并复制文字。");
@@ -2133,7 +2267,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
 
     try {
       const exportResult = await exportReviewedContract(exportFile, exportModifications, activeJob?.job_id);
-      downloadBlob(exportResult.blob, "reviewed_contract.docx");
+      downloadBlob(exportResult.blob, buildReviewedExportFilename(exportFile.name));
       setEditorNotice(
         exportResult.skipped > 0
           ? `Word 审阅版已生成：已写入 ${exportResult.applied} 处可精确定位的修改；${exportResult.skipped} 条未采纳或无法回写的建议已跳过，仍保留在右侧供后续处理。`
@@ -2293,7 +2427,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
             <p>{[
               intakeCriteria.party_role === "party_a" ? "我方为甲方/采购方" : intakeCriteria.party_role === "party_b" ? "我方为乙方/供应方" : intakeCriteria.party_role === "other" ? `我方角色：${intakeCriteria.other_party_role || "待补充"}` : "我方身份待确认",
               intakeCriteria.business_context && `业务目标：${intakeCriteria.business_context}`,
-              intakeCriteria.focus_areas.length && `重点：${intakeCriteria.focus_areas.join("、")}`,
+              "审查范围：系统将覆盖全部常用合同风险维度",
               intakeCriteria.non_negotiables && `底线：${intakeCriteria.non_negotiables}`,
             ].filter(Boolean).join("；")}</p>
             <small>这些信息只作为审查立场与谈判偏好，不会被视为合同中已经存在的约定。</small>
@@ -2319,6 +2453,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
         onDraftChange={setIntakeChatDraft}
         onSend={(event) => void sendIntakeChatMessage(event)}
         onStop={stopIntakeDraft}
+        activeModel={activeModel}
       />
     </section>
   );
@@ -2334,6 +2469,16 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          {auth.identity?.is_admin && (
+            <button className="secondary-button" type="button" onClick={() => void openModelConfig()}>
+              切换模型
+            </button>
+          )}
+          {auth.identity?.is_admin && (
+            <button className="secondary-button" type="button" onClick={() => void openOperationLogs()}>
+              用户操作日志
+            </button>
+          )}
           <button className="secondary-button" type="button" onClick={() => setShowReviewRecords(true)}>
             审查记录
           </button>
@@ -2350,6 +2495,49 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
         onRecover={(jobId) => void recoverReviewJob(jobId)}
         recoveringJobId={recoveringJobId}
       />
+      {showOperationLogs && (
+        <div role="dialog" aria-modal="true" aria-label="用户操作日志" style={{ position: "fixed", inset: 0, zIndex: 40, display: "grid", placeItems: "center", padding: 20, background: "rgba(15,23,42,.38)" }}>
+          <section style={{ width: "min(900px, 100%)", maxHeight: "min(78vh, 720px)", overflow: "auto", borderRadius: 16, padding: 24, background: "#fff", boxShadow: "0 20px 60px rgba(15,23,42,.22)" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16 }}>
+              <div><h2 style={{ margin: 0 }}>用户操作日志</h2><p style={{ margin: "6px 0 16px", color: "#64748b" }}>只记录操作元数据，不含密码、手机号和合同内容。</p></div>
+              <button className="secondary-button" type="button" onClick={() => setShowOperationLogs(false)}>关闭</button>
+            </div>
+            {operationLogError ? <p role="alert" style={{ color: "#b42318" }}>{operationLogError}</p> : (
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
+                <thead><tr style={{ textAlign: "left", color: "#475569" }}><th style={{ padding: 9 }}>时间</th><th style={{ padding: 9 }}>用户</th><th style={{ padding: 9 }}>操作</th><th style={{ padding: 9 }}>结果</th></tr></thead>
+                <tbody>{operationLogs.map((entry, index) => <tr key={`${entry.occurred_at}-${index}`} style={{ borderTop: "1px solid #e2e8f0" }}><td style={{ padding: 9 }}>{new Date(entry.occurred_at).toLocaleString()}</td><td style={{ padding: 9 }}>{entry.display_name}（{entry.username}）</td><td style={{ padding: 9 }}>{entry.action}</td><td style={{ padding: 9 }}>{entry.detail}</td></tr>)}</tbody>
+              </table>
+            )}
+          </section>
+        </div>
+      )}
+      {showModelConfig && (
+        <div className="model-dialog-backdrop" role="dialog" aria-modal="true" aria-label="切换模型">
+          <section className="model-dialog">
+            <header className="model-dialog-header">
+              <div><p className="model-dialog-eyebrow">模型设置</p><h2>切换大模型</h2><p>切换后，后续对话和新发起的审核会使用新模型；进行中的任务不受影响。</p></div>
+              <span className="model-dialog-status"><i />{modelConfig ? `已加载 ${modelConfig.allowed_models.length} 个模型` : "读取中"}</span>
+            </header>
+            <div className="model-dialog-content">
+              <p className="model-dialog-label">当前模型</p>
+              {modelConfig ? <div className="model-choice-grid" role="radiogroup" aria-label="模型">
+                {modelConfig.allowed_models.map((model) => (
+                  <label className="model-choice" key={model}>
+                    <input type="radio" name="active-model" value={model} checked={modelConfig.active_model === model} onChange={() => setModelConfig({ ...modelConfig, active_model: model })} />
+                    <span className="model-choice-card"><b>✓</b><strong>{model}</strong><small>{/flash/i.test(model) ? "响应更快，适合常规对话与合同初审。" : "适合复杂条款推理与深度审查。"}</small></span>
+                  </label>
+                ))}
+              </div> : <p className="model-dialog-loading">正在读取可用模型…</p>}
+              <details className="model-custom-details"><summary>新增自定义大模型</summary><p>API Key 仅保存到后端，普通用户无法查看。</p>
+                <div className="model-custom-grid">{([['display_name','显示名称，例如：内部模型'], ['model_id','模型 ID'], ['base_url','OpenAI 兼容接口地址'], ['api_key','API Key']] as const).map(([key, label]) => <input key={key} aria-label={label} type={key === 'api_key' ? 'password' : 'text'} placeholder={label} value={newModel[key]} onChange={(event) => setNewModel({ ...newModel, [key]: event.target.value })} />)}</div>
+                <button className="model-secondary-action" type="button" disabled={isSavingModel || !newModel.display_name || !newModel.model_id || !newModel.base_url || !newModel.api_key} onClick={() => void saveNewModel()}>{isSavingModel ? "保存中…" : "新增模型"}</button>
+              </details>
+              {modelConfigError ? <p className="model-dialog-error" role="alert">{modelConfigError}</p> : null}
+              <footer className="model-dialog-actions"><button className="model-secondary-action" type="button" onClick={() => setShowModelConfig(false)}>取消</button><button className="model-primary-action" type="button" disabled={!modelConfig || isSavingModel} onClick={() => void saveModelConfig()}>{isSavingModel ? "保存中…" : "保存并切换"}</button></footer>
+            </div>
+          </section>
+        </div>
+      )}
       <div className={`workbench-shell${!review ? " workbench-shell-chat" : ""}`}>
         <div className="workbench-main">
           <input
@@ -2364,9 +2552,9 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
         <section
           className={`workspace robin-review-workspace${isSidebarCollapsed ? " workspace-collapsed" : ""}`}
           aria-busy={isLoading}
-          style={readerPanelHeight && !isSidebarCollapsed ? { "--review-panel-height": `${readerPanelHeight}px` } as CSSProperties : undefined}
+          style={!isSidebarCollapsed ? { "--review-panel-height": `${readerPanelHeight ?? 0}px` } as CSSProperties : undefined}
         >
-          <section className="reader-panel robin-document-panel" ref={readerPanelRef}>
+          <section className="reader-panel robin-document-panel" ref={setReaderPanelNode}>
             <div className="compact-document-bar">
               <div className="document-info">
                 <span className="document-icon" aria-hidden="true">
@@ -2563,12 +2751,14 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
                               <div className="risk-chip-row">
                                 <span>{levelLabel[risk.level]}</span>
                                 <span className={`acceptance-chip${accepted ? " acceptance-chip-done" : ""}`}>
-                                  {accepted ? "已自动修改" : "待处理"}
+                                  {accepted ? "已应用" : "待确认"}
                                 </span>
                               </div>
-                              <span className={`evidence-chip${risk.evidence_status === "verified" ? " evidence-chip-verified" : ""}`}>
-                                {risk.evidence_status === "verified" ? "依据已核验" : "需人工核验"}
-                              </span>
+                              {!accepted ? (
+                                <span className={`evidence-chip${risk.evidence_status === "verified" ? " evidence-chip-verified" : ""}`}>
+                                  {risk.evidence_status === "verified" ? "依据已核验" : "待确认"}
+                                </span>
+                              ) : null}
                               {feedbackDecision ? (
                                 <span className={`feedback-chip feedback-chip-${feedbackDecision}`}>
                                   {feedbackDecision === "confirmed" ? "已确认风险" : feedbackDecision === "rejected" ? "已标记非风险" : "已采纳修改"}
@@ -2587,16 +2777,16 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
                                 onClick={() => applySuggestion(risk, riskKey)}
                               >
                                 {accepted
-                                  ? "已处理"
+                                  ? "已应用"
                                   : reviewStage !== "modification"
                                     ? "深度审查后可修改"
                                     : needsManualOriginalLocation
                                       ? canApplyAtSelectedLocation
-                                        ? "在选中处引用"
-                                        : "确认定位后修改"
+                                        ? "确认应用"
+                                        : "确认定位后应用"
                                       : isMissingClause(risk.original_text)
-                                        ? "由我补充"
-                                        : "引用修改"}
+                                        ? "确认补充"
+                                        : "确认应用"}
                               </button>
                               {accepted && appliedModification ? (
                                 <button className="secondary-button inline-button" type="button" onClick={() => void undoRiskModification(risk, riskKey)}>
@@ -2624,15 +2814,23 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
                             </div>
                           </div>
 
-                          {accepted && appliedModification?.actor_display_name ? (
-                            <p className="risk-title">修改人：{appliedModification.actor_display_name}</p>
+                          {accepted && appliedModification ? (
+                            <label className="risk-editor-name">
+                              <span>修改人</span>
+                              <input
+                                aria-label={`${risk.item}的修改人`}
+                                value={appliedModification.editor_display_name ?? appliedModification.actor_display_name ?? "当前用户"}
+                                onChange={(event) => setModificationEditorName(appliedModification, event.target.value)}
+                                onBlur={(event) => setModificationEditorName(appliedModification, event.target.value, true)}
+                              />
+                            </label>
                           ) : null}
 
                           <div className={`original-block${isMissingClause(risk.original_text) ? " original-missing" : ""}`}>
                             <p className="risk-title">{isMissingClause(risk.original_text) ? "建议插入位置" : "定位原文"}</p>
                             <p>
                               {isMissingClause(risk.original_text)
-                                ? getInsertionAnchor(risk) ?? "合同中缺失该约定，暂未锁定明确插入位置，可手动选择段落。"
+                                ? getInsertionAnchor(risk, editorText) ?? "合同中缺失该约定，未能自动定位插入位置；请在左侧正文中选择要插入到哪一段后面。"
                                 : risk.original_text}
                             </p>
                           </div>
@@ -2657,7 +2855,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
                                 </div>
                               ) : null}
                               <button className="secondary-button inline-button" type="button" onClick={() => void copySuggestionToClipboard(risk)}>
-                                复制修改建议
+                                复制修订后条款
                               </button>
                             </div>
                           ) : null}
@@ -2668,8 +2866,8 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
                               <p>{risk.risk}</p>
                             </div>
                             <div className="suggestion-block">
-                              <p className="risk-title">{isMissingClause(risk.original_text) ? "建议补充条款" : "修改建议"}</p>
-                              <p>{risk.suggestion}</p>
+                              <p className="risk-title">修订后条款</p>
+                              <p>{cleanSuggestedContractText(risk.suggestion)}</p>
                             </div>
                           </div>
 
@@ -2816,7 +3014,7 @@ function AuthenticatedWorkspace({ auth }: { auth: ReturnType<typeof useAuth> }) 
                   </details>
                 ) : null}
 
-                <ReviewPanel deepReview={review.deep_review} reviewStage={reviewStage} />
+                <ReviewPanel deepReview={review.deep_review} localReferences={review.local_references} reviewStage={reviewStage} />
               </div>
             </section>
           </aside>
