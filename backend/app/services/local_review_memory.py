@@ -18,8 +18,10 @@ def _data_root() -> Path:
     configured = os.getenv("LOCAL_REVIEW_DATA_ROOT")
     if configured:
         return Path(configured)
-    # .../法务/legal-ai-platform-git/backend/app/services -> .../法务
-    return Path(__file__).resolve().parents[min(2, len(Path(__file__).resolve().parents) - 1)]
+    # Prefer the 法务 data root when present; fall back so a shorter server
+    # checkout does not crash on parents[4].
+    parents = Path(__file__).resolve().parents
+    return parents[min(4, len(parents) - 1)]
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:

@@ -1,5 +1,6 @@
 from app.schemas.review import ContractOverview, IntakeChatMessage, IntakeChatRequest, IntakeReviewCriteria
 from app.services.intake_chat import (
+    _clean_intake_quick_replies,
     _clean_quick_replies,
     _merge_criteria,
     _recover_assistant_message,
@@ -30,7 +31,7 @@ def test_intake_chat_fallback_first_asks_for_role(monkeypatch) -> None:
         "我代表乙方/供应方。",
         "我是业务经办人，需要兼顾交易落地与风险控制。",
     ]
-    assert len(response.suggested_questions) == 2
+    assert response.suggested_questions == []
 
 
 def test_intake_chat_fallback_builds_ready_criteria_from_free_text(monkeypatch) -> None:
@@ -82,6 +83,16 @@ def test_quick_replies_are_deduplicated_clamped_and_length_limited() -> None:
     ]
 
 
+def test_intake_quick_replies_drop_scope_selection_options() -> None:
+    replies = _clean_intake_quick_replies([
+        "重点分析验收视为通过条款的修改方案",
+        "补充GMP合规相关的业务担忧",
+        "我代表甲方/采购方。",
+    ])
+
+    assert replies == ["我代表甲方/采购方。"]
+
+
 def test_intake_chat_retries_once_when_model_json_is_invalid(monkeypatch) -> None:
     monkeypatch.setenv("DASHSCOPE_API_KEY", "test-key")
     monkeypatch.setattr("app.services.intake_chat.OpenAI", lambda **kwargs: object())
@@ -113,7 +124,7 @@ def test_intake_chat_retries_once_when_model_json_is_invalid(monkeypatch) -> Non
     assert attempts == [False, True]
     assert response.source == "model"
     assert response.ready_for_review is True
-    assert response.suggested_questions == ["这项条款还可以怎样修改？"]
+    assert response.suggested_questions == []
 
 
 def test_intake_chat_retries_parseable_but_wrong_model_shape(monkeypatch) -> None:

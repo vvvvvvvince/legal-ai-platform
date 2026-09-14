@@ -190,6 +190,29 @@ def test_paragraph_reference_recovers_an_exact_source_anchor() -> None:
     assert any("段落编号" in warning for warning in hydrated.warnings)
 
 
+def test_paragraph_reference_in_anchor_is_resolved_before_returning_to_ui() -> None:
+    _, references = openai_review.format_contract_with_paragraph_references("第一条 付款安排。\n甲方应在验收后付款。")
+    review = ReviewResponse(
+        filename="contract.docx",
+        risks=[
+            ReviewRisk(
+                item="数据安全",
+                level="high",
+                original_text="【缺失该约定】",
+                anchor_text="P002",
+                insert_after_text="P001",
+                risk="缺少数据使用限制。",
+                suggestion="未经甲方书面同意，乙方不得使用甲方数据。",
+            )
+        ],
+    )
+
+    hydrated = openai_review.hydrate_review_clause_references(review, references)
+
+    assert hydrated.risks[0].anchor_text == "甲方应在验收后付款。"
+    assert hydrated.risks[0].insert_after_text == "第一条 付款安排。"
+
+
 def test_quote_repair_only_accepts_verbatim_text_from_the_source_paragraph(monkeypatch) -> None:
     contract_text = "乙方仅赔偿直接损失，不承担间接损失。"
     review = ReviewResponse(

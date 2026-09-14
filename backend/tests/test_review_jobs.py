@@ -2,7 +2,7 @@ from concurrent.futures import ThreadPoolExecutor
 import sqlite3
 import threading
 
-from app.services.review_jobs import IdempotencyConflict, ReviewJobStore
+from app.services.review_jobs import IdempotencyConflict, ReviewJobStore, ReviewJobWorker
 
 
 def test_store_creates_and_filters_by_tenant(tmp_path):
@@ -69,6 +69,17 @@ def test_store_cleanup_removes_only_old_terminal_jobs(tmp_path):
     assert store.get_job(old.job_id, "local") is None
 
 
+def test_expired_job_ids_match_cleanup_candidates(tmp_path):
+    store = ReviewJobStore(tmp_path / "jobs.sqlite3")
+    finished = store.create_job(tenant_id="local", job_type="deep_review", request={})
+    running = store.create_job(tenant_id="local", job_type="deep_review", request={})
+    assert store.claim_next_job().job_id == finished.job_id
+    store.complete_job(finished.job_id, {})
+    assert store.claim_next_job().job_id == running.job_id
+
+    assert store.list_expired_job_ids(retention_days=0) == [finished.job_id]
+
+
 def test_store_deduplicates_idempotent_submission(tmp_path):
     store = ReviewJobStore(tmp_path / "jobs.sqlite3")
     first = store.create_job(tenant_id="shared", job_type="deep_review", request={"v": 1}, idempotency_key="k1")
@@ -95,6 +106,29 @@ def test_expired_lease_can_be_reclaimed_by_another_worker(tmp_path):
     second = store.claim_next_job("worker-b", lease_seconds=10)
     assert second and second.lease_owner == "worker-b"
     assert store.heartbeat(job.job_id, "worker-a") is False
+
+
+def test_worker_survives_lost_lease_without_overwriting_new_owner(tmp_path):
+    store = ReviewJobStore(tmp_path / "jobs.sqlite3")
+    job = store.create_job(tenant_id="shared", job_type="deep_review", request={})
+
+    def lose_lease_and_return(_request):
+        with store._connect() as connection:
+            connection.execute(
+                "UPDATE review_jobs SET lease_expires_at = '2000-01-01T00:00:00+00:00' WHERE job_id = ?",
+                (job.job_id,),
+            )
+        replacement = store.claim_next_job("replacement", lease_seconds=10)
+        assert replacement and replacement.lease_owner == "replacement"
+        return {"review_status": "stale-worker-result"}
+
+    worker = ReviewJobWorker(store, lose_lease_and_return, lease_seconds=10, heartbeat_interval=1)
+
+    assert worker.run_once() is True
+    reclaimed = store.get_job(job.job_id, "shared")
+    assert reclaimed and reclaimed.status == "running" and reclaimed.lease_owner == "replacement"
+    store.complete_job(job.job_id, {"review_status": "replacement-result"}, worker_id="replacement")
+    assert store.get_job(job.job_id, "shared").result["review_status"] == "replacement-result"
 
 
 def test_concurrent_idempotent_submissions_return_one_job(tmp_path):
